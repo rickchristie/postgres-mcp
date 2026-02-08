@@ -1,0 +1,21 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "pgflock up",
+      "type": "shell",
+      "command": "pgflock",
+      "args": ["up"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "isBackground": true,
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "focus": true
+      },
+      "problemMatcher": []
+    }
+  ]
+}
