@@ -56,7 +56,7 @@ Create Postgres MCP with Golang.
     - At the end, it writes the config file to the location.
   - Can specify which additional string/instruction to be returned when the error message contains specific message.
     For example, if error matches regex "xxxx", then append this string to the RAW result when when returning (used for dynamic prompt injection, help steer AI agents). 
-    Custom prompt injections are always evaluated and appended following array ordering, top to bottom.
+    Custom prompt injections are always evaluated and appended following array ordering, top to bottom. When multiple prompts match, they are concatenated with newline separators — each prompt is displayed as its own paragraph.
     - The error prompt matching is against ALL error messages (hook error messages are included, Golang errors too), not just specific Postgres error codes.
   - Can also specify additional pattern matching for sanitization. For example, I can create matching regex for KTP ID or phone numbers with capture groups, and then a sanitized string that can be used to turn "+62821233447" to "+62xxx447". This can be done to dynamically sanitize the response as data security policy for the AI Agent. Sanitization is always applied when match, and is applied from top to bottom following the array ordering.
     This means the same sanitization regex should not be duplicated in multiple entries, as only the first match will be applied.
@@ -93,6 +93,14 @@ Create Postgres MCP with Golang.
       - Go's exec.Command passes no shell context. The hook binary receives raw bytes on stdin. No injection possible at the transport level.
       - If a hook author does something reckless like eval `cat /dev/stdin`, that's on them. But the MCP server itself isn't creating the vulnerability. We need to properly document this for users.
   - Default hook timeout in seconds.
+  - Library mode hooks (Go interfaces):
+    - In library mode, hooks are Go interfaces instead of command-line scripts. This avoids JSON serialization overhead, preserves Go type information, and is the natural choice for Go library consumers.
+    - `BeforeQueryHook` interface: receives SQL query string, returns (possibly modified) query string or error to reject.
+    - `AfterQueryHook` interface: receives `*QueryOutput` directly (native Go types), returns (possibly modified) `*QueryOutput` or error to reject.
+    - No JSON round-trip for library hooks — AfterQueryHook works with Go structs directly, preserving int64 precision and all type information.
+    - No regex pattern matching for library hooks — the hook function itself decides whether to act (user has full control inside their Run implementation).
+    - Same timeout and pipeline-stopping behavior as command hooks — any hook failure stops the pipeline.
+    - Library hooks and command hooks are mutually exclusive — if Go hooks are set in Config, command-based HooksConfig is ignored.
 - MCP reads connection string through environment variable `GOPGMCP_PG_CONNSTRING`.
   - It's postgresql connection string  - so whether it's sslmode, etc. - can be specified here. It has highest priority.
   - If connection string from environment is not found, server will try to read host, port, dbname, and sslmode from configuration file.
@@ -114,6 +122,7 @@ Create Postgres MCP with Golang.
     - COPY FROM - blocked by default (`allow_copy_from: false`). COPY FROM can bulk-import data into tables. COPY TO (export) is not blocked.
     - CREATE FUNCTION / CREATE PROCEDURE - blocked by default (`allow_create_function: false`). These can create server-side functions containing arbitrary SQL that bypasses protection checks when called, similar to DO blocks.
     - PREPARE - blocked by default (`allow_prepare: false`). Prepared statements persist at the session level and can be executed later via EXECUTE, bypassing protection checks on the prepared content.
+    - ALTER SYSTEM - blocked by default (`allow_alter_system: false`). ALTER SYSTEM modifies `postgresql.auto.conf` and can change any server-level parameter. Dangerous examples: `shared_preload_libraries` (load arbitrary libraries), `archive_command` (execute arbitrary shell commands), `ssl = off` (disable encryption), `listen_addresses = '*'` (expose to network). Requires superuser, but dev environments often connect as superuser.
     - DELETE without WHERE - blocked by default (`allow_delete_without_where: false`).
     - UPDATE without WHERE - blocked by default (`allow_update_without_where: false`).
     - Multi-statement queries (e.g. `SELECT 1; DROP TABLE users`) - always blocked, cannot be toggled.
@@ -129,10 +138,11 @@ Create Postgres MCP with Golang.
   - All logs are printed out.
   - People can install as CLI tool and run as long as they have Golang.
 - This Golang MCP library is not only startable as CLI MCP server, but also a library that can be initialized and then registered as internal Agent Loop code as tool call.
-  - In toolcall mode, the PostgresMcp requires config object to be built and passed on construction.
-  - PostgresMcp hooks, sanitization, etc can also be passed from the Config file.
+  - In library mode, PostgresMcp is instantiated with a full PostgreSQL connection string (must include credentials) and a Config object. Unlike CLI mode, library mode does not read connection details from Config.Connection fields — the connection string is the sole source of connection information.
+  - PostgresMcp hooks, sanitization, etc can also be passed from the Config object.
   - The API for library mode is the tool calls. For each tool (e.g. Query, ListTables, DescribeTable) - there's a function that can be called directly.
     - Each function takes context, and input struct, and returns output struct and error.
+  - All tool functions (Query, ListTables, DescribeTable) are safe for concurrent use from multiple goroutines. All internal state is either immutable after construction or goroutine-safe (pgxpool, channel semaphore, zerolog).
 - Use zerolog as logger.
 - No graceful shutdown needed. If server is killed, close all connections immediately.
 - Config validation panics on startup (not errors). This is intentional — both CLI and library mode are expected to initialize at application startup. Missing/invalid config values should crash immediately rather than produce subtle runtime failures. Library users call `New()` during initialization, so panics are caught at startup.
@@ -174,7 +184,8 @@ Create Postgres MCP with Golang.
       "allow_create_function": false,
       "allow_prepare": false,
       "allow_delete_without_where": false,
-      "allow_update_without_where": false
+      "allow_update_without_where": false,
+      "allow_alter_system": false
     },
     "query": {
       "default_timeout_seconds": 30,

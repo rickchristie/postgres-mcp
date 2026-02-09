@@ -165,6 +165,7 @@ type ProtectionConfig struct {
     AllowPrepare            bool `json:"allow_prepare"`
     AllowDeleteWithoutWhere bool `json:"allow_delete_without_where"`
     AllowUpdateWithoutWhere bool `json:"allow_update_without_where"`
+    AllowAlterSystem        bool `json:"allow_alter_system"`
 }
 
 type QueryConfig struct {
@@ -203,6 +204,55 @@ type HookEntry struct {
     Args           []string `json:"args"`
     TimeoutSeconds int      `json:"timeout_seconds"`
 }
+
+// --- Library mode hook interfaces ---
+// These are used when consumers embed pgmcp as a Go library.
+// They avoid JSON serialization and work with native Go types.
+// Library hooks and command hooks are mutually exclusive —
+// if Go hooks are set, HooksConfig is ignored.
+
+// BeforeQueryHook can inspect and modify queries before execution.
+type BeforeQueryHook interface {
+    // Run receives the SQL query string. Returns the (possibly modified) query.
+    // Return error to reject the query (error message is returned to caller).
+    Run(ctx context.Context, query string) (string, error)
+}
+
+// AfterQueryHook can inspect and modify results after execution.
+type AfterQueryHook interface {
+    // Run receives the query result as a Go struct (no JSON serialization).
+    // Returns the (possibly modified) result.
+    // Return error to reject the result (error message is returned to caller).
+    Run(ctx context.Context, result *QueryOutput) (*QueryOutput, error)
+}
+
+// BeforeQueryHookEntry wraps a BeforeQueryHook with metadata.
+type BeforeQueryHookEntry struct {
+    Name    string            // Descriptive name for logging and error messages
+    Timeout time.Duration     // Per-hook timeout; 0 = use hooks.default_timeout
+    Hook    BeforeQueryHook
+}
+
+// AfterQueryHookEntry wraps an AfterQueryHook with metadata.
+type AfterQueryHookEntry struct {
+    Name    string
+    Timeout time.Duration
+    Hook    AfterQueryHook
+}
+```
+
+The `Config` struct includes both command-based and Go hook fields:
+
+```go
+type Config struct {
+    // ... (all fields from above) ...
+    Hooks HooksConfig `json:"hooks"` // CLI mode: command-based hooks
+
+    // Library mode: Go function hooks (json:"-", not serializable).
+    // Mutually exclusive with Hooks — if Go hooks are set, HooksConfig is ignored.
+    BeforeQueryHooks []BeforeQueryHookEntry `json:"-"`
+    AfterQueryHooks  []AfterQueryHookEntry  `json:"-"`
+}
 ```
 
 **Config loading logic** (internal to `pgmcp.go` or `cmd/`):
@@ -210,7 +260,7 @@ type HookEntry struct {
 2. Otherwise use `<cwd>/.gopgmcp/config.json`
 3. Parse JSON → `Config` struct
 4. Validate: compile all regex patterns, check required fields (server.port), check timeout values > 0
-5. Return descriptive errors on validation failure
+5. Panic with descriptive message on validation failure — designed to catch incorrect settings at startup (see config validation philosophy below)
 
 **Config defaults** (applied before validation, when fields are zero-value):
 - `protection.*` → all `false` (Go zero-value = blocked, safe default; set to `true` to allow specific operations)
@@ -228,7 +278,7 @@ type HookEntry struct {
 - All regex patterns must compile successfully
 - All per-hook and per-rule timeout values must be > 0
 
-**Config validation panics intentionally.** Both CLI and library mode initialize at application startup. Missing/invalid config should crash immediately rather than produce subtle runtime failures. Library users call `New()` during initialization, so panics are caught at startup.
+**Config validation panics intentionally.** Both CLI and library mode initialize at application startup. Missing/invalid config should crash immediately rather than produce subtle runtime failures. Library users call `New()` during initialization, so panics are caught at startup. This philosophy applies to all validation across the entire codebase: `New()` validates all config fields relevant to the library API before proceeding, and all internal package constructors (`hooks.NewRunner`, `sanitize.NewSanitizer`, `errprompt.NewMatcher`, `timeout.NewManager`) panic on invalid config (e.g., invalid regex patterns). None of these constructors return errors for configuration issues — config problems are always panics. Only runtime failures (e.g., cannot connect to database) return errors.
 
 ---
 
@@ -255,6 +305,7 @@ type Config struct {
     AllowPrepare            bool
     AllowDeleteWithoutWhere bool
     AllowUpdateWithoutWhere bool
+    AllowAlterSystem        bool
     ReadOnly                bool
 }
 
@@ -407,6 +458,14 @@ func (c *Checker) checkNode(node *pg_query.Node) error {
             }
         }
 
+    case *pg_query.Node_AlterSystemStmt:
+        // ALTER SYSTEM modifies postgresql.auto.conf — can change any server-level
+        // parameter including shared_preload_libraries, archive_command, ssl, etc.
+        // Requires superuser, but dev environments often connect as superuser.
+        if !c.config.AllowAlterSystem {
+            return fmt.Errorf("ALTER SYSTEM is not allowed: can modify server-level configuration (shared_preload_libraries, archive_command, ssl, etc.)")
+        }
+
     case *pg_query.Node_TransactionStmt:
         // readOnly: block BEGIN READ WRITE / START TRANSACTION READ WRITE
         if c.config.ReadOnly {
@@ -516,10 +575,10 @@ type Runner struct {
     logger         zerolog.Logger
 }
 
-func NewRunner(config Config, logger zerolog.Logger) (*Runner, error)
-// Compiles all regex patterns, returns error on invalid regex.
+func NewRunner(config Config, logger zerolog.Logger) *Runner
+// Compiles all regex patterns, panics on invalid regex or invalid config.
 // For each hook: if Timeout > 0, uses that; otherwise falls back to config.DefaultTimeout.
-// Panics if config.DefaultTimeout == 0 and any hook exists (validated at config load, but defense-in-depth).
+// Panics if config.DefaultTimeout == 0 and any hook exists.
 
 // HasAfterQueryHooks returns true if any AfterQuery hooks are configured.
 // Used by the query pipeline to skip JSON serialization round-trip when no hooks exist.
@@ -656,8 +715,8 @@ type Sanitizer struct {
     rules []compiledRule
 }
 
-func NewSanitizer(rules []Rule) (*Sanitizer, error)
-// Compiles all regex patterns.
+func NewSanitizer(rules []Rule) *Sanitizer
+// Compiles all regex patterns, panics on invalid regex.
 
 // SanitizeRows applies sanitization to each field value in the result rows.
 // For JSONB/array fields (map[string]interface{}, []interface{}),
@@ -720,10 +779,12 @@ type Matcher struct {
     rules []compiledRule
 }
 
-func NewMatcher(rules []Rule) (*Matcher, error)
+func NewMatcher(rules []Rule) *Matcher
+// Compiles all regex patterns, panics on invalid regex.
 
 // Match checks error message against all rules (top to bottom).
-// Returns concatenation of all matching prompt messages.
+// Returns all matching prompt messages joined with newline separators.
+// Each prompt is displayed as its own paragraph.
 // Returns empty string if no match.
 func (m *Matcher) Match(errMsg string) string
 ```
@@ -758,7 +819,8 @@ type Manager struct {
     defaultTimeout time.Duration
 }
 
-func NewManager(config Config) (*Manager, error)
+func NewManager(config Config) *Manager
+// Compiles all regex patterns, panics on invalid regex.
 
 // GetTimeout returns the timeout for the given SQL.
 // First matching rule wins. Falls back to default.
@@ -805,7 +867,9 @@ type PostgresMcp struct {
     pool       *pgxpool.Pool
     semaphore  chan struct{}
     protection *protection.Checker
-    hooks      *hooks.Runner
+    cmdHooks   *hooks.Runner          // command-based hooks (CLI mode, from HooksConfig)
+    goBeforeHooks []BeforeQueryHookEntry // Go function hooks (library mode)
+    goAfterHooks  []AfterQueryHookEntry  // Go function hooks (library mode)
     sanitizer  *sanitize.Sanitizer
     errPrompts *errprompt.Matcher
     timeoutMgr *timeout.Manager
@@ -813,29 +877,47 @@ type PostgresMcp struct {
 }
 
 // New creates a new PostgresMcp instance.
-// connString is the PostgreSQL connection string.
-// If empty, connection details are read from config.Connection.
-// The username and password must be embedded in connString or config when using library mode.
+// connString is the PostgreSQL connection string (must include credentials).
+// In library mode, connString is required — Config.Connection fields are ignored
+// (the CLI is responsible for building connString from Config.Connection + prompted credentials).
+// Panics on invalid config. Returns error only for runtime failures (e.g., pool creation).
 func New(ctx context.Context, connString string, config Config, logger zerolog.Logger) (*PostgresMcp, error)
 
 // Close closes the connection pool.
 func (p *PostgresMcp) Close()
 ```
 
+**Goroutine safety:** All exported methods of `PostgresMcp` (`Query`, `ListTables`, `DescribeTable`) are safe for concurrent use from multiple goroutines. All internal state is either:
+- Immutable after construction: compiled regex patterns, config values, protection checker
+- Goroutine-safe by design: `pgxpool.Pool`, `chan struct{}` semaphore, `zerolog.Logger`
+
+Each query execution creates its own data (rows, maps) and the sanitizer operates on per-query data. No shared mutable state exists.
+
 **New() logic:**
-1. Validate: if `config.Pool.MaxConns <= 0`, panic (`"pool.max_conns must be > 0"`).
-2. Build connection string: if `connString` is non-empty, use it. Otherwise build from `config.Connection` fields (host, port, dbname, sslmode).
-3. Configure `pgxpool.Config`: apply pool settings, set `DefaultQueryExecMode` to `pgx.QueryExecModeExec`.
-4. If `config.Server.ReadOnly`, set `AfterConnect` hook to run `SET default_transaction_read_only = on` on each connection.
-5. Create `pgxpool.Pool`.
-6. Create semaphore: `make(chan struct{}, config.Pool.MaxConns)` — bounds concurrent query pipelines.
-7. Initialize all internal components, mapping pgmcp config types to internal package config types:
-   - `protection.NewChecker(protection.Config{AllowSet: config.Protection.AllowSet, ..., AllowCopyFrom: config.Protection.AllowCopyFrom, AllowCreateFunction: config.Protection.AllowCreateFunction, AllowPrepare: config.Protection.AllowPrepare, ..., ReadOnly: config.Server.ReadOnly})`
-   - `hooks.NewRunner(hooks.Config{DefaultTimeout: time.Duration(config.Hooks.DefaultTimeoutSeconds) * time.Second, ...}, logger)`
+1. Validate config (panics on invalid config — catches incorrect settings at startup):
+   - `connString` must be non-empty
+   - `config.Pool.MaxConns` must be > 0 — a zero-capacity semaphore would deadlock all queries
+   - `config.Query.DefaultTimeoutSeconds` must be > 0 — no default, user must explicitly set this
+   - `config.Query.ListTablesTimeoutSeconds` must be > 0 — no default, user must explicitly set this
+   - `config.Query.DescribeTableTimeoutSeconds` must be > 0 — no default, user must explicitly set this
+   - `config.Query.MaxResultLength` defaults to 100000 if 0; must be > 0 after default
+   - `config.Hooks.DefaultTimeoutSeconds` must be > 0 if any hooks are configured (command-based OR Go hooks) — no default, user must explicitly set this
+   - All per-hook and per-rule `TimeoutSeconds` must be > 0
+   - All regex patterns validated by internal constructors (they panic on invalid regex)
+   - If both Go hooks (`BeforeQueryHooks`/`AfterQueryHooks`) and command hooks (`Hooks.BeforeQuery`/`Hooks.AfterQuery`) are configured, panic — they are mutually exclusive
+2. Configure `pgxpool.Config`: apply pool settings, set `DefaultQueryExecMode` to `pgx.QueryExecModeExec`.
+3. If `config.Server.ReadOnly`, set `AfterConnect` hook to run `SET default_transaction_read_only = on` on each connection.
+4. Create `pgxpool.Pool` (returns error on connection failure — this is a runtime error, not a config error).
+5. Create semaphore: `make(chan struct{}, config.Pool.MaxConns)` — bounds concurrent query pipelines.
+6. Initialize all internal components, mapping pgmcp config types to internal package config types:
+   - `protection.NewChecker(protection.Config{AllowSet: config.Protection.AllowSet, ..., AllowCopyFrom: config.Protection.AllowCopyFrom, AllowCreateFunction: config.Protection.AllowCreateFunction, AllowPrepare: config.Protection.AllowPrepare, AllowAlterSystem: config.Protection.AllowAlterSystem, ..., ReadOnly: config.Server.ReadOnly})`
+   - If Go hooks are configured (library mode): store `config.BeforeQueryHooks` and `config.AfterQueryHooks` directly on the struct. No Runner needed.
+   - If command hooks are configured (CLI mode): `hooks.NewRunner(hooks.Config{DefaultTimeout: time.Duration(config.Hooks.DefaultTimeoutSeconds) * time.Second, ...}, logger)`
+   - If no hooks: `cmdHooks` is nil, Go hook slices are nil.
    - `sanitize.NewSanitizer(mapSanitizationRules(config.Sanitization))`
    - `errprompt.NewMatcher(mapErrorPromptRules(config.ErrorPrompts))`
-   - `timeout.NewManager(timeout.Config{DefaultTimeout: time.Duration(config.Query.DefaultTimeoutSeconds) * time.Second, ListTablesTimeout: time.Duration(config.Query.ListTablesTimeoutSeconds) * time.Second, DescribeTableTimeout: time.Duration(config.Query.DescribeTableTimeoutSeconds) * time.Second, ...})`
-8. Return `*PostgresMcp`.
+   - `timeout.NewManager(timeout.Config{DefaultTimeout: time.Duration(config.Query.DefaultTimeoutSeconds) * time.Second, Rules: mapTimeoutRules(config.Query.TimeoutRules)})`
+7. Return `*PostgresMcp`.
 
 ### 3.2 Query Tool
 
@@ -877,7 +959,11 @@ func (p *PostgresMcp) Query(ctx context.Context, input QueryInput) *QueryOutput 
 
     // 2. Run BeforeQuery hooks (middleware chain)
     var err error
-    sql, err = p.hooks.RunBeforeQuery(ctx, sql)
+    if len(p.goBeforeHooks) > 0 {
+        sql, err = p.runGoBeforeHooks(ctx, sql)
+    } else if p.cmdHooks != nil {
+        sql, err = p.cmdHooks.RunBeforeQuery(ctx, sql)
+    }
     if err != nil {
         return p.handleError(err)
     }
@@ -920,24 +1006,28 @@ func (p *PostgresMcp) Query(ctx context.Context, input QueryInput) *QueryOutput 
         return p.handleError(err)
     }
 
-    // 7-9. AfterQuery hooks — only serialize/deserialize if hooks are configured.
-    // This avoids unnecessary JSON round-trip that would lose numeric precision.
+    // 7-9. AfterQuery hooks — bifurcated by hook type.
     var finalResult *QueryOutput
-    if p.hooks.HasAfterQueryHooks() {
-        // Serialize to JSON for AfterQuery hooks (complete result: columns + rows + error)
+    if len(p.goAfterHooks) > 0 {
+        // Go hooks (library mode): pass *QueryOutput directly, no JSON round-trip.
+        // Preserves full Go type information and numeric precision.
+        finalResult, err = p.runGoAfterHooks(ctx, result)
+        if err != nil {
+            return p.handleError(err)
+        }
+    } else if p.cmdHooks != nil && p.cmdHooks.HasAfterQueryHooks() {
+        // Command hooks (CLI mode): JSON serialize → hooks → deserialize.
+        // Uses UseNumber() to preserve numeric precision through round-trip.
         resultJSON, err := json.Marshal(result)
         if err != nil {
             return p.handleError(err)
         }
 
-        // Run AfterQuery hooks (middleware chain)
-        modifiedJSON, err := p.hooks.RunAfterQuery(ctx, string(resultJSON))
+        modifiedJSON, err := p.cmdHooks.RunAfterQuery(ctx, string(resultJSON))
         if err != nil {
             return p.handleError(err)
         }
 
-        // Parse back modified result — use json.NewDecoder with UseNumber()
-        // to preserve numeric precision (prevents int64 → float64 lossy conversion).
         finalResult = &QueryOutput{}
         dec := json.NewDecoder(strings.NewReader(modifiedJSON))
         dec.UseNumber()
@@ -945,6 +1035,7 @@ func (p *PostgresMcp) Query(ctx context.Context, input QueryInput) *QueryOutput 
             return p.handleError(err)
         }
     } else {
+        // No hooks: pass result through directly (no JSON round-trip).
         finalResult = result
     }
 
@@ -955,6 +1046,59 @@ func (p *PostgresMcp) Query(ctx context.Context, input QueryInput) *QueryOutput 
     p.truncateIfNeeded(finalResult)
 
     return finalResult
+}
+```
+
+**Go hook execution methods (library mode):**
+
+```go
+// runGoBeforeHooks runs Go-interface BeforeQuery hooks in middleware chain.
+// Each hook receives the (possibly modified) query from the previous hook.
+// Timeout is enforced per-hook: uses entry.Timeout if > 0, else config.Hooks.DefaultTimeoutSeconds.
+func (p *PostgresMcp) runGoBeforeHooks(ctx context.Context, sql string) (string, error) {
+    for _, entry := range p.goBeforeHooks {
+        timeout := entry.Timeout
+        if timeout == 0 {
+            timeout = time.Duration(p.config.Hooks.DefaultTimeoutSeconds) * time.Second
+        }
+        hookCtx, cancel := context.WithTimeout(ctx, timeout)
+
+        modified, err := entry.Hook.Run(hookCtx, sql)
+        cancel()
+        if err != nil {
+            // Check if it was a timeout
+            if hookCtx.Err() == context.DeadlineExceeded {
+                return "", fmt.Errorf("before_query hook error: hook timed out (name: %s, timeout: %s)", entry.Name, timeout)
+            }
+            return "", fmt.Errorf("before_query hook error: hook rejected query (name: %s): %w", entry.Name, err)
+        }
+        sql = modified
+    }
+    return sql, nil
+}
+
+// runGoAfterHooks runs Go-interface AfterQuery hooks in middleware chain.
+// Each hook receives the *QueryOutput directly (no JSON serialization).
+// Timeout is enforced per-hook: uses entry.Timeout if > 0, else config.Hooks.DefaultTimeoutSeconds.
+func (p *PostgresMcp) runGoAfterHooks(ctx context.Context, result *QueryOutput) (*QueryOutput, error) {
+    for _, entry := range p.goAfterHooks {
+        timeout := entry.Timeout
+        if timeout == 0 {
+            timeout = time.Duration(p.config.Hooks.DefaultTimeoutSeconds) * time.Second
+        }
+        hookCtx, cancel := context.WithTimeout(ctx, timeout)
+
+        modified, err := entry.Hook.Run(hookCtx, result)
+        cancel()
+        if err != nil {
+            if hookCtx.Err() == context.DeadlineExceeded {
+                return nil, fmt.Errorf("after_query hook error: hook timed out (name: %s, timeout: %s)", entry.Name, timeout)
+            }
+            return nil, fmt.Errorf("after_query hook error: hook rejected result (name: %s): %w", entry.Name, err)
+        }
+        result = modified
+    }
+    return result, nil
 }
 ```
 
@@ -1015,8 +1159,8 @@ Handles (in switch order):
 - `pgtype.Circle` → `"<(x,y),r>"` format
 - `pgtype.Bits` → bit string `"10101010"` (bit/varbit)
 - `[16]byte` (UUID) → formatted UUID string
-- `[]byte` → try JSON unmarshal first (JSONB safety net), else base64-encoded string (bytea, xml)
-- `string` → try JSON unmarshal (JSONB safety net), else pass through (money, timetz, char, varchar, text, enum, composite, tsvector, tsquery)
+- `[]byte` → base64-encoded string (bytea, xml)
+- `string` → pass through (money, timetz, char, varchar, text, enum, composite, tsvector, tsquery)
 - `map[string]interface{}` → recursive convertValue on values (JSONB objects)
 - `[]interface{}` → recursive convertValue on elements (JSONB arrays and Postgres arrays — arrays may contain typed elements like `[16]uint8` for uuid[])
 - Other types (`int16`, `int32`, `int64`, `bool`, etc.) → pass through to json.Marshal
@@ -1234,15 +1378,8 @@ func convertValue(v interface{}) interface{} {
     case []byte:
         // Handles bytea and xml (both return as []uint8).
         // net.HardwareAddr is also []byte but matched by its own case above.
-        // Check if it's JSONB content first (safety net — pgx usually returns parsed maps)
-        if len(val) > 0 && (val[0] == '{' || val[0] == '[') {
-            dec := json.NewDecoder(bytes.NewReader(val))
-            dec.UseNumber()
-            var parsed interface{}
-            if err := dec.Decode(&parsed); err == nil {
-                return parsed
-            }
-        }
+        // No JSON auto-parsing here — pgx with QueryExecModeExec returns JSONB as
+        // parsed Go types (map[string]interface{}, []interface{}), never as []byte.
         // Binary data (bytea, xml) → base64-encoded string.
         // Note: xml columns return same Go type as bytea ([]uint8) — cannot distinguish.
         // XML content is base64 encoded. Users needing text should cast in SQL: v::text.
@@ -1250,15 +1387,10 @@ func convertValue(v interface{}) interface{} {
     case string:
         // Covers: money ("$1,234.56"), timetz ("10:30:00+05:30"), char, varchar, text,
         // enum, composite ("(a,b,c)"), tsvector, tsquery.
-        // Also safety net for JSONB returned as string.
-        if len(val) > 0 && (val[0] == '{' || val[0] == '[') {
-            dec := json.NewDecoder(strings.NewReader(val))
-            dec.UseNumber()
-            var parsed interface{}
-            if err := dec.Decode(&parsed); err == nil {
-                return parsed
-            }
-        }
+        // No JSON auto-parsing here — pgx with QueryExecModeExec returns JSONB as
+        // parsed Go types (map[string]interface{}, []interface{}), never as raw string.
+        // Auto-parsing would cause false positives: text columns containing JSON-like
+        // strings (e.g., '{"key": "value"}') would be silently converted to maps.
         return val
     case map[string]interface{}:
         // JSONB objects. Recurse into values — nested values may need conversion.
@@ -1296,7 +1428,7 @@ import (
 )
 ```
 
-**JSONB handling concern (verified):** With `pgx.QueryExecModeExec`, pgx actually returns JSONB as parsed Go types (`map[string]interface{}`, `[]interface{}`) — NOT as raw `string` or `[]byte`. This means the `string`/`[]byte` JSON detection in `convertValue` is a safety net for edge cases but not the primary path. The `convertValue` cases for `map[string]interface{}` and `[]interface{}` recurse into values/elements, which is safe for JSONB (elements are already JSON-safe types, recursion is a no-op) and necessary for Postgres arrays (elements may be typed values like `[16]uint8` for uuid[]).
+**JSONB handling (verified):** With `pgx.QueryExecModeExec`, pgx returns JSONB as parsed Go types (`map[string]interface{}`, `[]interface{}`) — NOT as raw `string` or `[]byte`. This was verified empirically via `pgxtype_verification_test.go`. Therefore, `convertValue` does NOT attempt JSON auto-parsing in the `string` or `[]byte` cases — doing so would cause false positives for text/varchar columns containing JSON-like strings (e.g., `'{"key": "value"}'` in a text column would be silently converted to a map). The `convertValue` cases for `map[string]interface{}` and `[]interface{}` recurse into values/elements, which is safe for JSONB (elements are already JSON-safe types, recursion is a no-op) and necessary for Postgres arrays (elements may be typed values like `[16]uint8` for uuid[]).
 
 **JSONB numeric precision limitation (verified):** pgx internally parses JSONB numbers as `float64`, so large integers inside JSONB (e.g., `{"id": 9007199254740993}`) lose precision — `9007199254740993` becomes `9.007199254740992e+15`. This happens inside pgx before `convertValue` sees the data. The `UseNumber()` approach in `convertValue` only helps if JSONB were returned as `string`/`[]byte` (which it is not in practice). This is a known pgx limitation for JSONB — users needing exact large integers in JSONB should store them as strings in the JSON (e.g., `{"id": "9007199254740993"}`).
 
@@ -1317,7 +1449,7 @@ The actual Go types returned by `rows.Values()` with `QueryExecModeExec` have be
 | `money` | `string` | Pass through (e.g., `"$1,234.56"`) |
 | `char(n)` | `string` | Pass through (space-padded) |
 | `varchar(n)` / `text` | `string` | Pass through |
-| `bytea` | `[]uint8` | base64 encode (try JSON first) |
+| `bytea` | `[]uint8` | base64 encode |
 | `timestamptz` / `timestamp` / `date` | `time.Time` | Format as RFC3339Nano |
 | `time` | `pgtype.Time` | Format as "HH:MM:SS" or "HH:MM:SS.ffffff" |
 | `timetz` | `string` | Pass through (e.g., `"10:30:00+05:30"`) |
@@ -1373,9 +1505,17 @@ The actual Go types returned by `rows.Values()` with `QueryExecModeExec` have be
 // The error message is always evaluated against error_prompts — matching
 // prompt messages are appended. This applies to ALL errors: Postgres errors,
 // protection rejections, hook rejections, hook error messages, Go errors.
+// Errors are logged for server-side observability before prompt augmentation.
 func (p *PostgresMcp) handleError(err error) *QueryOutput {
+    // Log error for server-side observability. Log the raw error before
+    // prompt augmentation so logs contain the original error without
+    // appended guidance text.
+    p.logger.Error().Err(err).Msg("query error")
+
     errMsg := err.Error()
-    // Check error prompts (evaluated against ALL error messages)
+    // Check error prompts (evaluated against ALL error messages).
+    // Multiple matching prompts are joined with newlines — each prompt
+    // is displayed as its own paragraph.
     prompt := p.errPrompts.Match(errMsg)
     if prompt != "" {
         errMsg = errMsg + "\n\n" + prompt
@@ -1579,11 +1719,23 @@ func (p *PostgresMcp) DescribeTable(ctx context.Context, input DescribeTableInpu
     }
     defer conn.Release()
 
-    // ... run multiple pg_catalog queries ...
+    // Construct properly-quoted identifier for $1::regclass parameters.
+    // quoteIdent doubles embedded double-quotes and wraps in double-quotes,
+    // ensuring names with special characters are handled correctly.
+    qualName := quoteIdent(schema) + "." + quoteIdent(input.Table)
+
+    // ... run multiple pg_catalog queries using qualName for $1::regclass
+    // and separate schema/table parameters for information_schema queries ...
+}
+
+// quoteIdent escapes a SQL identifier for safe use in $1::regclass.
+// Doubles embedded double-quotes and wraps in double-quotes.
+func quoteIdent(name string) string {
+    return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
 }
 ```
 
-**Implementation:** Runs multiple `pg_catalog` queries for columns, indexes, constraints, foreign keys, and partition info. Uses parameterized queries with schema and table name. Does NOT go through the hook/protection/sanitization pipeline. Acquires the semaphore and uses `query.describe_table_timeout_seconds` for its timeout.
+**Implementation:** Runs multiple `pg_catalog` queries for columns, indexes, constraints, foreign keys, and partition info. Queries using `$1::regclass` receive the `qualName` parameter (properly quoted schema-qualified identifier). Queries using `information_schema` receive separate `schema` and `table` parameters. Does NOT go through the hook/protection/sanitization pipeline. Acquires the semaphore and uses `query.describe_table_timeout_seconds` for its timeout.
 
 Must fully support **tables, views, materialized views, foreign tables, and partitioned tables** — the goal is for AI agents to have complete information to craft queries. The approach differs by object type:
 
@@ -2078,6 +2230,17 @@ All tests are pure unit tests — no database needed. Default config: all `Allow
 | `TestReadOnly_AllowsOtherSet` | `SET search_path = 'public'` | ReadOnly=true, AllowSet=true | allowed |
 | `TestReadOnly_SetBlockedTakesPriority` | `SET default_transaction_read_only = off` | ReadOnly=true, AllowSet=false | `"SET default_transaction_read_only is blocked in read-only mode"` (readOnly check runs first) |
 
+#### ALTER SYSTEM Protection
+
+| Test | SQL | Config | Expected Error Contains |
+|---|---|---|---|
+| `TestAlterSystem_Set` | `ALTER SYSTEM SET shared_preload_libraries = 'pg_stat_statements'` | default | `"ALTER SYSTEM is not allowed: can modify server-level configuration"` |
+| `TestAlterSystem_Reset` | `ALTER SYSTEM RESET shared_preload_libraries` | default | `"ALTER SYSTEM is not allowed"` |
+| `TestAlterSystem_ResetAll` | `ALTER SYSTEM RESET ALL` | default | `"ALTER SYSTEM is not allowed"` |
+| `TestAlterSystem_ArchiveCommand` | `ALTER SYSTEM SET archive_command = '/bin/malicious'` | default | `"ALTER SYSTEM is not allowed"` |
+| `TestAlterSystem_SSL` | `ALTER SYSTEM SET ssl = off` | default | `"ALTER SYSTEM is not allowed"` |
+| `TestAlterSystem_Allowed` | `ALTER SYSTEM SET work_mem = '256MB'` | AllowAlterSystem=true | allowed |
+
 #### Allowed Statements
 
 | Test | SQL | Config | Expected |
@@ -2171,6 +2334,28 @@ Tests use the shell scripts in `testdata/hooks/`. All scripts must be `chmod +x`
 | `TestHasAfterQueryHooks_True` | config with AfterQuery hooks | `HasAfterQueryHooks()` returns `true` |
 | `TestHasAfterQueryHooks_False` | config with no AfterQuery hooks | `HasAfterQueryHooks()` returns `false` |
 
+### 6.3.1 Unit Tests: Go Hooks (`query_gohooks_test.go`)
+
+These test the `runGoBeforeHooks` and `runGoAfterHooks` methods directly, using mock implementations of the hook interfaces. No database needed — tests create `PostgresMcp` structs with pre-populated hook slices and call the methods.
+
+| Test | Hook Config | Expected |
+|---|---|---|
+| `TestGoBeforeHooks_PassThrough` | Single BeforeQueryHook that returns query unchanged | query passes through, no error |
+| `TestGoBeforeHooks_Reject` | Single BeforeQueryHook that returns error `"blocked"` | error: `"before_query hook error: hook rejected query (name: ...): blocked"` |
+| `TestGoBeforeHooks_ModifyQuery` | Single BeforeQueryHook that changes query | modified query returned |
+| `TestGoBeforeHooks_Chaining` | Two hooks: first modifies, second receives modified | second hook receives output of first |
+| `TestGoBeforeHooks_ChainStopsOnReject` | Two hooks: first rejects | second hook never called, error returned |
+| `TestGoBeforeHooks_Timeout` | Hook that sleeps 2s, timeout=1s | error: `"before_query hook error: hook timed out (name: ..., timeout: 1s)"` |
+| `TestGoBeforeHooks_PerHookTimeoutOverridesDefault` | Hook with entry.Timeout=3s, default=1s, hook sleeps 2s | succeeds (uses per-hook 3s, not default 1s) |
+| `TestGoBeforeHooks_Empty` | No hooks configured | query passes through unchanged |
+| `TestGoAfterHooks_PassThrough` | Single AfterQueryHook that returns result unchanged | result passes through, no error |
+| `TestGoAfterHooks_Reject` | Single AfterQueryHook that returns error | error: `"after_query hook error: hook rejected result (name: ...): ..."` |
+| `TestGoAfterHooks_ModifyResult` | Hook that adds a column to result | modified result returned |
+| `TestGoAfterHooks_Chaining` | Two hooks: first modifies, second receives modified | second hook receives output of first |
+| `TestGoAfterHooks_Timeout` | Hook that sleeps 2s, timeout=1s | error: `"after_query hook error: hook timed out (name: ..., timeout: 1s)"` |
+| `TestGoAfterHooks_Empty` | No hooks configured | result passes through unchanged |
+| `TestGoAfterHooks_PreservesTypes` | Hook that inspects result types via type assertion | int64, string, etc. preserved — no serialization occurred |
+
 ### 6.4 Unit Tests: Error Prompts (`internal/errprompt/errprompt_test.go`)
 
 | Test | Error Message | Rules | Expected |
@@ -2199,7 +2384,7 @@ Tests use the shell scripts in `testdata/hooks/`. All scripts must be `chmod +x`
 | `TestLoadConfigFromEnvPath` | `GOPGMCP_CONFIG_PATH` set | reads from env path, not default location |
 | `TestLoadConfigMissing` | no config file | returns error containing config path |
 | `TestLoadConfigInvalidJSON` | malformed JSON | returns error containing `"invalid"` or `"unmarshal"` |
-| `TestLoadConfigInvalidRegex` | invalid regex in sanitization rules | returns error containing `"regex"` or `"compile"` and the invalid pattern |
+| `TestLoadConfigInvalidRegex` | invalid regex in sanitization rules | panics with message containing `"regex"` or `"compile"` and the invalid pattern |
 | `TestLoadConfigDefaults_MaxResultLength` | config with `max_result_length` omitted (0) | defaults to `100000` |
 | `TestLoadConfigValidation_NoPort` | config without server.port | panics with message containing `"server.port"` |
 | `TestLoadConfigValidation_ZeroMaxConns` | config with pool.max_conns = 0 | panics with message containing `"pool.max_conns"` |
@@ -2218,6 +2403,9 @@ Tests use the shell scripts in `testdata/hooks/`. All scripts must be `chmod +x`
 | `TestLoadConfigProtectionExplicitAllow` | config with `allow_drop: true` | `AllowDrop` is `true`, all others remain `false` |
 | `TestLoadConfigProtectionNewFields` | config with `allow_copy_from: true, allow_create_function: true, allow_prepare: true` | respective fields are `true`, others remain `false` |
 | `TestLoadConfigSSLMode` | config with `sslmode: "verify-full"` | `Connection.SSLMode` is `"verify-full"` |
+| `TestLoadConfigValidation_GoHooksAndCmdHooksMutuallyExclusive` | config with both `BeforeQueryHooks` (Go) and `Hooks.BeforeQuery` (command) | panics with message about mutual exclusivity |
+| `TestLoadConfigValidation_GoHooksRequireDefaultTimeout` | config with `BeforeQueryHooks` set but `hooks.default_timeout_seconds` = 0 | panics with message containing `"hooks.default_timeout_seconds"` |
+| `TestLoadConfigValidation_GoHooksOnlyNoCmd` | config with only `BeforeQueryHooks` (Go), no command hooks | no panic (valid configuration) |
 
 ---
 
@@ -2274,6 +2462,29 @@ Run with: `go test -tags=integration -race -v ./...`
 | `TestQuery_ExplainAnalyzeProtection` | Table | `EXPLAIN ANALYZE DELETE FROM users` | Error: `"DELETE without WHERE clause is not allowed"` |
 | `TestQuery_UTF8Truncation` | Table with multi-byte UTF-8 data (e.g. emoji, CJK characters) | SELECT with low max_result_length | Truncated output is valid UTF-8 (no broken multi-byte sequences) |
 
+#### Go Hook Integration Tests (Library Mode)
+
+These tests verify the Go-interface hook pipeline used in library mode. No shell scripts — hooks are Go functions implementing `BeforeQueryHook`/`AfterQueryHook` interfaces. All use pgflock.
+
+| Test | Setup | Action | Assert |
+|---|---|---|---|
+| `TestQuery_GoBeforeHook_Accept` | Config with BeforeQueryHook that returns query unchanged | `SELECT 1` | Query succeeds, result correct |
+| `TestQuery_GoBeforeHook_Reject` | Config with BeforeQueryHook that returns error | `SELECT 1` | Error contains hook name and rejection message |
+| `TestQuery_GoBeforeHook_ModifyQuery` | Config with BeforeQueryHook that changes query to `SELECT 2` | `SELECT 1` | Result contains `2`, not `1` |
+| `TestQuery_GoBeforeHook_Chaining` | Config with two BeforeQueryHooks: first appends ` AS a`, second appends ` -- tagged` | `SELECT 1` | Modified query includes both modifications in order |
+| `TestQuery_GoBeforeHook_Timeout` | Config with BeforeQueryHook that sleeps longer than timeout | `SELECT 1` | Error contains `"before_query hook error: hook timed out"` and hook name |
+| `TestQuery_GoBeforeHook_PerHookTimeout` | Config with BeforeQueryHook: entry.Timeout=2s, default=1s, hook sleeps 1.5s | `SELECT 1` | Query succeeds (per-hook timeout of 2s > 1.5s sleep) |
+| `TestQuery_GoBeforeHook_ProtectionStillApplied` | Config with BeforeQueryHook that modifies query to `DROP TABLE users` | `SELECT 1` | Error: `"DROP statements are not allowed"` — protection runs after hooks |
+| `TestQuery_GoAfterHook_Accept` | Config with AfterQueryHook that returns result unchanged | `SELECT 1` | Result correct, no modification |
+| `TestQuery_GoAfterHook_Reject` | Config with AfterQueryHook that returns error | `SELECT 1` | Error contains hook name and rejection message |
+| `TestQuery_GoAfterHook_ModifyResult` | Config with AfterQueryHook that adds a column to result | `SELECT 1` | Result contains the added column |
+| `TestQuery_GoAfterHook_Chaining` | Config with two AfterQueryHooks: first adds column, second appends row | `SELECT 1` | Result contains both modifications |
+| `TestQuery_GoAfterHook_Timeout` | Config with AfterQueryHook that sleeps longer than timeout | `SELECT 1` | Error contains `"after_query hook error: hook timed out"` and hook name |
+| `TestQuery_GoAfterHook_NoPrecisionLoss` | Config with AfterQueryHook (passthrough), table with bigint 2^53+1 | `SELECT big_id FROM ...` | Value preserved as exact int64 — no JSON round-trip, no float64 loss |
+| `TestQuery_GoAfterHook_ReceivesNativeTypes` | Config with AfterQueryHook that type-asserts result fields | `SELECT 1::bigint, 'hello'::text` | Hook receives int64 and string (not json.Number or interface{}), confirms no serialization |
+| `TestQuery_GoHooksMutualExclusion` | Config with both Go hooks and command hooks configured | `New()` call | Panics with message about mutual exclusivity |
+| `TestQuery_GoHooksDefaultTimeoutRequired` | Config with Go hooks but `hooks.default_timeout_seconds` = 0 | `New()` call | Panics with message containing `"hooks.default_timeout_seconds"` |
+
 #### pgx Type Verification Tests (pgflock)
 
 These tests verify actual types returned by `rows.Values()` with `QueryExecModeExec` (simple protocol), validating all assumptions in `convertValue`. All use pgflock. Each test logs the actual Go type and verifies `convertValue` produces the expected output for every value variant (NULL, edge cases, typical values).
@@ -2328,7 +2539,7 @@ All Go types verified empirically. Assert columns reflect actual test results, n
 | Test | Postgres Type | Test Values | Verified Go Type | convertValue |
 |---|---|---|---|---|
 | `TestPgxTypes_ByteA` | `bytea` | `decode('deadbeef','hex'), decode('','hex'), NULL` | `[]uint8` | base64 encode. Empty → `""`. |
-| `TestPgxTypes_ByteA_JsonLookalike` | `bytea` | `'{"not":"json"}'::bytea` | `[]uint8` | Attempts JSON parse, succeeds (it IS valid UTF-8 JSON in this case), returns parsed map. |
+| `TestPgxTypes_ByteA_JsonLookalike` | `bytea` | `'{"not":"json"}'::bytea` | `[]uint8` | base64 encode (no JSON auto-parsing — bytea is always base64, even if content looks like JSON). |
 
 ##### Date/Time Types
 
