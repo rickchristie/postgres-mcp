@@ -21,23 +21,25 @@ Create Postgres MCP with Golang.
   - This prevents SQL injection attacks.
 - Uses pg_query_go to parse SQL and check for disallowed statements (e.g. DROP, TRUNCATE, DELETE without WHERE, etc):
   - Uses PostgreSQL's actual parser via cgo — not a regex or hand-written parser. This means 100% parsing fidelity with real Postgres.
-  - Returns proper AST - we recursively walk and traverse through it to check for disallowed statements, including DML inside CTEs (e.g. `WITH x AS (DELETE FROM users RETURNING *) SELECT * FROM x`).
+  - Returns proper AST - we recursively walk and traverse through it to check for disallowed statements, including DML inside CTEs (e.g. `WITH x AS (DELETE FROM users RETURNING *) SELECT * FROM x`) and inner statements inside EXPLAIN/EXPLAIN ANALYZE.
 - Handles complex strings in SQLs.
   - Supports JSONB, arrays, nested queries, CTEs, etc.
   - JSONB, arrays etc are returned as proper JSON, JSON arrays, not as stringified values.
 - Have these tools:
   - Query:
     - Returns only an output struct (no Go error). All errors (Postgres errors, protection rejections, hook rejections, Go errors) are converted into the output's error message field. This error message is then evaluated against error_prompts regex patterns for appending additional guidance.
-    - Returns RAW results, formatted as JSON.
+    - Returns RAW results, formatted as JSON. Includes rows affected count for DML statements (INSERT/UPDATE/DELETE) even without RETURNING clause.
     - The query is run in a transaction.
   - ListTables:
-    - Returns list of tables in the connected database (includes views, materialized views, foreign tables).
+    - Returns list of tables in the connected database (includes views, materialized views, foreign tables, partitioned tables).
     - Can list everything that is granted to the connected user.
+    - Tables where the user has SELECT privilege but lacks schema USAGE privilege are listed separately with a flag/context indicating restricted schema access, so AI agents can make informed decisions.
     - Must acquire semaphore before executing (same semaphore as Query — ensures total concurrent operations are bounded by pool size).
     - Must have a configurable timeout (`list_tables_timeout_seconds`). Must be > 0, no default — user must explicitly set in config. Server panics on start if not set.
   - DescribeTable:
-    - Returns table schema for the specified table.
-    - Returns everything including indexes, constraints, foreign keys, etc.
+    - Returns table schema for the specified table (supports tables, views, materialized views, foreign tables, partitioned tables).
+    - Returns everything including indexes, constraints, foreign keys, partition information, etc.
+    - Schema parameter defaults to "public" when not specified.
     - Can describe everything that is granted to the connected user.
     - Must acquire semaphore before executing (same semaphore as Query — ensures total concurrent operations are bounded by pool size).
     - Must have a configurable timeout (`describe_table_timeout_seconds`). Must be > 0, no default — user must explicitly set in config. Server panics on start if not set.
@@ -109,9 +111,13 @@ Create Postgres MCP with Golang.
     - DROP - blocked by default (`allow_drop: false`).
     - TRUNCATE - blocked by default (`allow_truncate: false`).
     - DO $$ blocks - blocked by default (`allow_do: false`). DO blocks can execute arbitrary SQL inside PL/pgSQL, bypassing all other protection checks.
+    - COPY FROM - blocked by default (`allow_copy_from: false`). COPY FROM can bulk-import data into tables. COPY TO (export) is not blocked.
+    - CREATE FUNCTION / CREATE PROCEDURE - blocked by default (`allow_create_function: false`). These can create server-side functions containing arbitrary SQL that bypasses protection checks when called, similar to DO blocks.
+    - PREPARE - blocked by default (`allow_prepare: false`). Prepared statements persist at the session level and can be executed later via EXECUTE, bypassing protection checks on the prepared content.
     - DELETE without WHERE - blocked by default (`allow_delete_without_where: false`).
     - UPDATE without WHERE - blocked by default (`allow_update_without_where: false`).
     - Multi-statement queries (e.g. `SELECT 1; DROP TABLE users`) - always blocked, cannot be toggled.
+    - EXPLAIN / EXPLAIN ANALYZE - always recurses into the inner statement and applies all protection rules. `EXPLAIN ANALYZE` actually executes the query, so `EXPLAIN ANALYZE DELETE FROM users` must be blocked when DELETE without WHERE is blocked. This is not togglable — EXPLAIN always checks its inner statement.
     - When Read-only mode is on, additionally block:
       - `RESET ALL` and `RESET default_transaction_read_only` (could disable read-only mode).
       - `BEGIN READ WRITE` / `START TRANSACTION READ WRITE` (explicit write transaction).
@@ -129,6 +135,7 @@ Create Postgres MCP with Golang.
     - Each function takes context, and input struct, and returns output struct and error.
 - Use zerolog as logger.
 - No graceful shutdown needed. If server is killed, close all connections immediately.
+- Config validation panics on startup (not errors). This is intentional — both CLI and library mode are expected to initialize at application startup. Missing/invalid config values should crash immediately rather than produce subtle runtime failures. Library users call `New()` during initialization, so panics are caught at startup.
 
 # Sample config JSON
 
@@ -163,6 +170,9 @@ Create Postgres MCP with Golang.
       "allow_drop": false,
       "allow_truncate": false,
       "allow_do": false,
+      "allow_copy_from": false,
+      "allow_create_function": false,
+      "allow_prepare": false,
       "allow_delete_without_where": false,
       "allow_update_without_where": false
     },
