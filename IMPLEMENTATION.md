@@ -206,19 +206,19 @@ type HookEntry struct {
 4. Validate: compile all regex patterns, check required fields (server.port), check timeout values > 0
 5. Return descriptive errors on validation failure
 
-**Config defaults** (applied when fields are zero-value):
+**Config defaults** (applied before validation, when fields are zero-value):
 - `protection.*` → all `false` (Go zero-value = blocked, safe default; set to `true` to allow specific operations)
-- `query.default_timeout_seconds` → `30`
-- `query.max_result_length` → `100000`
-- `server.health_check_path` → `/health-check`
-- `hooks.default_timeout_seconds` → `10`
+- `query.max_result_length` → `100000` (when 0; cannot be disabled — there is no "no limit" option)
 
-**Config validation** (server panics on start if any fail):
+**Config validation** (server panics on start if any fail — runs after defaults):
 - `server.port` must be specified and > 0
 - `pool.max_conns` must be > 0 — a zero-capacity semaphore would deadlock all queries
-- `hooks.default_timeout_seconds` must be > 0 if any hooks are configured — running hooks without a timeout is not allowed
+- `query.default_timeout_seconds` must be > 0 — no default, user must explicitly set this
+- `query.max_result_length` must be > 0 (guaranteed after defaults, but explicit validation for safety)
+- `hooks.default_timeout_seconds` must be > 0 if any hooks are configured — no default, user must explicitly set this
+- `server.health_check_path` must be non-empty if `server.health_check_enabled` is true — no default, user must explicitly set this
 - All regex patterns must compile successfully
-- All timeout values must be > 0
+- All per-hook and per-rule timeout values must be > 0
 
 ---
 
@@ -257,22 +257,49 @@ func NewChecker(config Config) *Checker
 func (c *Checker) Check(sql string) error
 ```
 
-**AST walking logic:**
+**AST walking logic — recursive to catch DML inside CTEs:**
+
+The checker uses recursive AST walking so that protection rules apply to DML statements inside CTEs (e.g., `WITH deleted AS (DELETE FROM users RETURNING *) SELECT * FROM deleted`). PostgreSQL allows INSERT, UPDATE, DELETE inside CTEs, and these must be checked just like top-level statements.
+
+The `Check` method handles multi-statement detection (top-level only), then delegates to `checkNode` for recursive protection checking. `checkNode` first extracts and recurses into any CTEs attached to the node, then applies protection rules to the node itself.
 
 ```go
-result, err := pg_query.Parse(sql)
-// err → return fmt.Errorf("SQL parse error: %w", err)
+func (c *Checker) Check(sql string) error {
+    result, err := pg_query.Parse(sql)
+    if err != nil {
+        return fmt.Errorf("SQL parse error: %w", err)
+    }
 
-// Multi-statement detection — always enforced, cannot be toggled off.
-// This catches "SELECT 1; DROP TABLE users" before any other check.
-if len(result.Stmts) > 1 {
-    return fmt.Errorf("multi-statement queries are not allowed: found %d statements", len(result.Stmts))
+    // Multi-statement detection — always enforced, cannot be toggled off.
+    // This catches "SELECT 1; DROP TABLE users" before any other check.
+    if len(result.Stmts) > 1 {
+        return fmt.Errorf("multi-statement queries are not allowed: found %d statements", len(result.Stmts))
+    }
+
+    for _, rawStmt := range result.Stmts {
+        if err := c.checkNode(rawStmt.Stmt); err != nil {
+            return err
+        }
+    }
+    return nil
 }
 
-for _, rawStmt := range result.Stmts {
-    switch node := rawStmt.Stmt.Node.(type) {
+// checkNode recursively checks a single AST node and its CTEs against protection rules.
+func (c *Checker) checkNode(node *pg_query.Node) error {
+    if node == nil {
+        return nil
+    }
+
+    // First, recurse into CTEs attached to this node.
+    // SELECT, INSERT, UPDATE, DELETE can all have WITH clauses containing DML.
+    if err := c.checkCTEs(node); err != nil {
+        return err
+    }
+
+    // Then check the node itself against protection rules.
+    switch n := node.Node.(type) {
     case *pg_query.Node_VariableSetStmt:
-        varSetStmt := node.VariableSetStmt
+        varSetStmt := n.VariableSetStmt
 
         // readOnly: block RESET ALL and RESET default_transaction_read_only
         // (VAR_RESET / VAR_RESET_ALL kinds)
@@ -321,19 +348,19 @@ for _, rawStmt := range result.Stmts {
         }
 
     case *pg_query.Node_DeleteStmt:
-        if !c.config.AllowDeleteWithoutWhere && node.DeleteStmt.WhereClause == nil {
+        if !c.config.AllowDeleteWithoutWhere && n.DeleteStmt.WhereClause == nil {
             return fmt.Errorf("DELETE without WHERE clause is not allowed")
         }
 
     case *pg_query.Node_UpdateStmt:
-        if !c.config.AllowUpdateWithoutWhere && node.UpdateStmt.WhereClause == nil {
+        if !c.config.AllowUpdateWithoutWhere && n.UpdateStmt.WhereClause == nil {
             return fmt.Errorf("UPDATE without WHERE clause is not allowed")
         }
 
     case *pg_query.Node_TransactionStmt:
         // readOnly: block BEGIN READ WRITE / START TRANSACTION READ WRITE
         if c.config.ReadOnly {
-            txStmt := node.TransactionStmt
+            txStmt := n.TransactionStmt
             for _, opt := range txStmt.Options {
                 if defElem, ok := opt.Node.(*pg_query.Node_DefElem); ok {
                     if defElem.DefElem.Defname == "transaction_read_only" {
@@ -348,6 +375,39 @@ for _, rawStmt := range result.Stmts {
             }
         }
     }
+    return nil
+}
+
+// checkCTEs extracts the WITH clause from a node (if any) and recursively
+// checks each CTE's subquery. SELECT, INSERT, UPDATE, DELETE can all carry
+// WITH clauses, and CTEs can contain DML that must be protection-checked.
+func (c *Checker) checkCTEs(node *pg_query.Node) error {
+    var withClause *pg_query.WithClause
+    switch n := node.Node.(type) {
+    case *pg_query.Node_SelectStmt:
+        withClause = n.SelectStmt.WithClause
+    case *pg_query.Node_InsertStmt:
+        withClause = n.InsertStmt.WithClause
+    case *pg_query.Node_UpdateStmt:
+        withClause = n.UpdateStmt.WithClause
+    case *pg_query.Node_DeleteStmt:
+        withClause = n.DeleteStmt.WithClause
+    }
+    if withClause == nil {
+        return nil
+    }
+    for _, cte := range withClause.Ctes {
+        cteNode, ok := cte.Node.(*pg_query.Node_CommonTableExpr)
+        if !ok {
+            continue
+        }
+        // Recursively check the CTE's subquery — this handles nested CTEs
+        // (a CTE whose subquery itself has a WITH clause) and DML inside CTEs.
+        if err := c.checkNode(cteNode.CommonTableExpr.Ctequery); err != nil {
+            return err
+        }
+    }
+    return nil
 }
 ```
 
@@ -836,7 +896,7 @@ func (p *PostgresMcp) collectRows(rows pgx.Rows) (*QueryOutput, error) {
 - `nil` → JSON null
 - `time.Time` → ISO 8601 string
 - `net.IPNet` → string
-- `pgtype.Numeric` → float64 or string
+- `pgtype.Numeric` → string (preserves full precision for financial/scientific data)
 - `[16]byte` (UUID) → formatted UUID string
 - `[]byte` → base64-encoded string (for bytea columns; also checks if content is valid JSON first for JSONB)
 - `map[string]interface{}` / `[]interface{}` → pass through (JSONB/arrays already parsed by pgx)
@@ -853,10 +913,9 @@ func convertValue(v interface{}) interface{} {
     case net.IPNet:
         return val.String()
     case pgtype.Numeric:
-        f, err := val.Float64Value()
-        if err == nil && f.Valid {
-            return f.Float64
-        }
+        // Always use string representation to preserve full precision.
+        // float64 silently loses precision for high-precision numeric values
+        // (e.g., financial data with many decimal places).
         return val.String()
     case [16]byte:
         // UUID
@@ -1450,6 +1509,14 @@ All tests are pure unit tests — no database needed. Default config: all `Allow
 |---|---|---|---|
 | `TestCTEWithDelete` | `WITH deleted AS (DELETE FROM users WHERE id = 1 RETURNING *) SELECT * FROM deleted` | default | allowed (has WHERE) |
 | `TestCTEWithDeleteNoWhere` | `WITH deleted AS (DELETE FROM users RETURNING *) SELECT * FROM deleted` | default | `"DELETE without WHERE clause is not allowed"` |
+| `TestCTEWithUpdateNoWhere` | `WITH updated AS (UPDATE users SET active = false RETURNING *) SELECT * FROM updated` | default | `"UPDATE without WHERE clause is not allowed"` |
+| `TestCTEWithUpdateWithWhere` | `WITH updated AS (UPDATE users SET active = false WHERE id = 1 RETURNING *) SELECT * FROM updated` | default | allowed (has WHERE) |
+| `TestCTENestedDML` | `WITH a AS (WITH b AS (DELETE FROM users RETURNING *) SELECT * FROM b) SELECT * FROM a` | default | `"DELETE without WHERE clause is not allowed"` (recursion into nested CTE) |
+| `TestCTEOnInsert` | `WITH src AS (DELETE FROM old_users RETURNING *) INSERT INTO archive SELECT * FROM src` | default | `"DELETE without WHERE clause is not allowed"` (CTE on INSERT statement) |
+| `TestCTEOnUpdate` | `WITH src AS (SELECT id FROM banned) UPDATE users SET active = false WHERE id IN (SELECT id FROM src)` | default | allowed (UPDATE has WHERE, CTE is SELECT) |
+| `TestCTEOnDelete` | `WITH src AS (SELECT id FROM banned) DELETE FROM users WHERE id IN (SELECT id FROM src)` | default | allowed (DELETE has WHERE, CTE is SELECT) |
+| `TestCTESelectOnly` | `WITH counts AS (SELECT department, COUNT(*) as cnt FROM employees GROUP BY department) SELECT * FROM counts` | default | allowed (CTE is SELECT, no DML) |
+| `TestCTEMultipleDML` | `WITH d AS (DELETE FROM old_users WHERE expired = true RETURNING *), i AS (INSERT INTO archive SELECT * FROM d RETURNING *) SELECT * FROM i` | default | allowed (DELETE has WHERE, INSERT has no protection check) |
 | `TestNestedSubquerySelect` | `SELECT * FROM (SELECT * FROM (SELECT id FROM users) AS a) AS b` | default | allowed |
 | `TestComplexJoins` | `SELECT u.*, o.* FROM users u JOIN orders o ON u.id = o.user_id LEFT JOIN items i ON o.id = i.order_id WHERE u.active = true` | default | allowed |
 | `TestWindowFunction` | `SELECT id, name, ROW_NUMBER() OVER (PARTITION BY department ORDER BY salary DESC) FROM employees` | default | allowed |
@@ -1542,12 +1609,18 @@ Tests use the shell scripts in `testdata/hooks/`. All scripts must be `chmod +x`
 | `TestLoadConfigMissing` | no config file | returns error containing config path |
 | `TestLoadConfigInvalidJSON` | malformed JSON | returns error containing `"invalid"` or `"unmarshal"` |
 | `TestLoadConfigInvalidRegex` | invalid regex in sanitization rules | returns error containing `"regex"` or `"compile"` and the invalid pattern |
-| `TestLoadConfigDefaults` | minimal config (only server.port and pool.max_conns) | `query.default_timeout_seconds` = 30, `query.max_result_length` = 100000, `hooks.default_timeout_seconds` = 10 |
+| `TestLoadConfigDefaults_MaxResultLength` | config with `max_result_length` omitted (0) | defaults to `100000` |
 | `TestLoadConfigValidation_NoPort` | config without server.port | panics with message containing `"server.port"` |
 | `TestLoadConfigValidation_ZeroMaxConns` | config with pool.max_conns = 0 | panics with message containing `"pool.max_conns"` |
-| `TestLoadConfigValidation_NegativeTimeout` | negative timeout value | returns error containing `"timeout"` |
-| `TestLoadConfigValidation_ZeroHookDefaultTimeout` | hooks configured but `default_timeout_seconds` = 0 | panics with message containing `"default_timeout_seconds"` |
-| `TestLoadConfigValidation_HookTimeoutFallback` | hook with `timeout_seconds` = 0, default = 10 | hook uses default (10s) |
+| `TestLoadConfigValidation_ZeroDefaultTimeout` | config with `default_timeout_seconds` = 0 | panics with message containing `"default_timeout_seconds"` |
+| `TestLoadConfigValidation_MissingDefaultTimeout` | config without `default_timeout_seconds` | panics with message containing `"default_timeout_seconds"` (no default, must be set) |
+| `TestLoadConfigValidation_NegativeTimeout` | negative timeout value | panics with message containing `"timeout"` |
+| `TestLoadConfigValidation_ZeroHookDefaultTimeout` | hooks configured but `hooks.default_timeout_seconds` = 0 | panics with message containing `"hooks.default_timeout_seconds"` |
+| `TestLoadConfigValidation_MissingHookDefaultTimeout` | hooks configured but `hooks.default_timeout_seconds` omitted | panics with message containing `"hooks.default_timeout_seconds"` (no default, must be set) |
+| `TestLoadConfigValidation_HookDefaultTimeoutNotRequiredWithoutHooks` | no hooks configured, `hooks.default_timeout_seconds` omitted | no panic (validation only applies when hooks exist) |
+| `TestLoadConfigValidation_HookTimeoutFallback` | hook with `timeout_seconds` = 0, `hooks.default_timeout_seconds` = 10 | hook uses default (10s) |
+| `TestLoadConfigValidation_HealthCheckPathEmpty` | `health_check_enabled` = true, `health_check_path` = "" | panics with message containing `"health_check_path"` |
+| `TestLoadConfigValidation_HealthCheckPathNotRequiredWhenDisabled` | `health_check_enabled` = false, `health_check_path` = "" | no panic (path not needed when disabled) |
 | `TestLoadConfigProtectionDefaults` | minimal config, no protection fields | all `Allow*` fields are `false` (Go zero-value = blocked) |
 | `TestLoadConfigProtectionExplicitAllow` | config with `allow_drop: true` | `AllowDrop` is `true`, all others remain `false` |
 | `TestLoadConfigSSLMode` | config with `sslmode: "verify-full"` | `Connection.SSLMode` is `"verify-full"` |
@@ -1587,7 +1660,7 @@ Run with: `go test -tags=integration -race -v ./...`
 | `TestQuery_NullValues` | Table with NULL columns | `SELECT * FROM ...` | NULL returned as JSON null (Go `nil`) |
 | `TestQuery_UUIDColumn` | Table with UUID column | `SELECT id FROM ...` | UUID as formatted string `"xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"` |
 | `TestQuery_TimestampColumn` | Table with timestamp column | `SELECT created_at FROM ...` | Timestamp as RFC3339Nano string |
-| `TestQuery_NumericColumn` | Table with numeric(10,2) | `SELECT price FROM ...` | Proper numeric value (float64) |
+| `TestQuery_NumericColumn` | Table with numeric(10,2) | `SELECT price FROM ...` | Numeric value as string (preserves precision, e.g. `"123.45"`) |
 | `TestQuery_BigIntColumn` | Table with bigint column, value `9007199254740993` (2^53+1) | `SELECT big_id FROM ...` | Value preserved as exact integer (not float64-truncated) |
 | `TestQuery_ByteaColumn` | Table with bytea column containing binary data | `SELECT avatar FROM ...` | Binary data returned as base64-encoded string |
 | `TestQuery_EmptyResult` | Empty table | `SELECT * FROM empty_table` | Empty rows array, columns present |
