@@ -21,7 +21,7 @@ Create Postgres MCP with Golang.
   - This prevents SQL injection attacks.
 - Uses pg_query_go to parse SQL and check for disallowed statements (e.g. DROP, TRUNCATE, DELETE without WHERE, etc):
   - Uses PostgreSQL's actual parser via cgo — not a regex or hand-written parser. This means 100% parsing fidelity with real Postgres.
-  - Returns proper AST - we walk and traverse through it to check for disallowed statements.
+  - Returns proper AST - we recursively walk and traverse through it to check for disallowed statements, including DML inside CTEs (e.g. `WITH x AS (DELETE FROM users RETURNING *) SELECT * FROM x`).
 - Handles complex strings in SQLs.
   - Supports JSONB, arrays, nested queries, CTEs, etc.
   - JSONB, arrays etc are returned as proper JSON, JSON arrays, not as stringified values.
@@ -60,7 +60,7 @@ Create Postgres MCP with Golang.
     - There is list of regex pattern and the timeout in seconds. 
     - When the first match is found, the rest of the regex are not evaluated.
     - Useful for queries/tables that are known to be slow, so that AI agents can be given more time to wait for the results.
-  - Default timeout if no regex match found.
+  - Default timeout if no regex match found. Must be > 0, no default value — user must explicitly set this in config. Server panics on start if not set.
   - Hooks map. Each hook is a map of regex pattern matching with bash command that will be executed with inputs that matches with the regex:
     - BeforeQuery - can reject Query, based on content. Regex matches against SQL query string.
       - Input: RAW query string, passed as stdin to the bash command.
@@ -77,7 +77,7 @@ Create Postgres MCP with Golang.
       - If any hook rejects, the whole Query is rejected.
       - Hooks are matched against the RAW result first, then executed. If the result is modified, the next hook will be matched against the modified result.
     - Each hook entry specifies the command path and optional arguments array. The command is executed directly via Go's exec.Command (no shell), with arguments passed separately.
-    - Hook timeout in seconds. Applies per hook. If not specified, falls back to default hook timeout. Default hook timeout must be > 0 — server panics on start if it's 0.
+    - Hook timeout in seconds. Applies per hook. If not specified, falls back to default hook timeout. Default hook timeout must be > 0, no default value — user must explicitly set this in config when hooks are configured. Server panics on start if hooks exist and this is not set.
     - When 1 hook crashes/times out, it does not stop the whole process, just log the error and continue.
     - The number of hooks being run is equal to the amount of connection in the pgxpool:
       - The system reads pgxpool config of max connections - it then forces a lock that for that amount that encompasses the transaction, Before and After hooks.
@@ -110,8 +110,8 @@ Create Postgres MCP with Golang.
     - When Read-only mode is on, additionally block:
       - `RESET ALL` and `RESET default_transaction_read_only` (could disable read-only mode).
       - `BEGIN READ WRITE` / `START TRANSACTION READ WRITE` (explicit write transaction).
-  - Max result length (in character length). Applied to the JSON result, if exceeded, truncate and append "...[truncated] Result is too long! Add limits in your query!".
-  - Health check path. Defaults to `/health-check`.
+  - Max result length (in character length). Applied to the JSON result, if exceeded, truncate and append "...[truncated] Result is too long! Add limits in your query!". Defaults to 100000 if not set (0). Cannot be disabled — there is no "no limit" option.
+  - Health check path. No default — must be explicitly set when health check is enabled. Server panics on start if health check is enabled and path is empty.
 - Authentication:
   - This MCP server is designed to be run in local or trusted environment, so no authentication for clients.
 - Server CLI command:
