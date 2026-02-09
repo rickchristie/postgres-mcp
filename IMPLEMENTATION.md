@@ -73,7 +73,8 @@ postgres-mcp/
 │       ├── modify_query.sh           # Test hook: returns modified_query
 │       ├── modify_result.sh          # Test hook: returns modified_result
 │       ├── slow.sh                   # Test hook: sleeps (for timeout testing)
-│       └── crash.sh                  # Test hook: exits with error
+│       ├── crash.sh                  # Test hook: exits with error
+│       └── bad_json.sh              # Test hook: returns unparseable content
 │
 ├── go.mod
 ├── go.sum
@@ -164,9 +165,11 @@ type ProtectionConfig struct {
 }
 
 type QueryConfig struct {
-    DefaultTimeoutSeconds int            `json:"default_timeout_seconds"`
-    MaxResultLength       int            `json:"max_result_length"`
-    TimeoutRules          []TimeoutRule  `json:"timeout_rules"`
+    DefaultTimeoutSeconds        int            `json:"default_timeout_seconds"`
+    ListTablesTimeoutSeconds     int            `json:"list_tables_timeout_seconds"`
+    DescribeTableTimeoutSeconds  int            `json:"describe_table_timeout_seconds"`
+    MaxResultLength              int            `json:"max_result_length"`
+    TimeoutRules                 []TimeoutRule  `json:"timeout_rules"`
 }
 
 type TimeoutRule struct {
@@ -214,6 +217,8 @@ type HookEntry struct {
 - `server.port` must be specified and > 0
 - `pool.max_conns` must be > 0 — a zero-capacity semaphore would deadlock all queries
 - `query.default_timeout_seconds` must be > 0 — no default, user must explicitly set this
+- `query.list_tables_timeout_seconds` must be > 0 — no default, user must explicitly set this
+- `query.describe_table_timeout_seconds` must be > 0 — no default, user must explicitly set this
 - `query.max_result_length` must be > 0 (guaranteed after defaults, but explicit validation for safety)
 - `hooks.default_timeout_seconds` must be > 0 if any hooks are configured — no default, user must explicitly set this
 - `server.health_check_path` must be non-empty if `server.health_check_enabled` is true — no default, user must explicitly set this
@@ -497,12 +502,22 @@ func (r *Runner) executeHook(ctx context.Context, hook compiledHook, input strin
     cmd := exec.CommandContext(ctx, hook.command, hook.args...)
     cmd.Stdin = strings.NewReader(input)
     output, err := cmd.Output()
-    // err → log and return nil, nil (continue)
+    if err != nil {
+        // Hooks are critical guardrails — any failure stops the pipeline.
+        // This covers: non-zero exit code, crash, timeout (context deadline exceeded).
+        if ctx.Err() == context.DeadlineExceeded {
+            return nil, fmt.Errorf("hook timed out: %s", hook.command)
+        }
+        return nil, fmt.Errorf("hook failed (command: %s): %w", hook.command, err)
+    }
     return output, nil
 }
 ```
 
 **Middleware chain logic (BeforeQuery):**
+
+Hooks are critical guardrails. Any hook failure (crash, timeout, non-zero exit code, unparseable response) stops the entire pipeline and is treated as an error. This is the safe default — a failing hook means the guardrail cannot verify the query, so the query must be rejected.
+
 ```go
 func (r *Runner) RunBeforeQuery(ctx context.Context, query string) (string, error) {
     current := query
@@ -510,19 +525,20 @@ func (r *Runner) RunBeforeQuery(ctx context.Context, query string) (string, erro
         if !hook.pattern.MatchString(current) {
             continue
         }
+        // executeHook returns error on crash, timeout, or non-zero exit code.
+        // Any such error stops the entire pipeline.
         output, err := r.executeHook(ctx, hook, current)
         if err != nil {
-            r.logger.Error().Err(err).Str("command", hook.command).Msg("hook failed")
-            continue
+            return "", fmt.Errorf("before_query hook error: %w", err)
         }
-        if output == nil {
-            continue
-        }
+
+        // Unparseable response from hook is also a pipeline-stopping error.
         var result BeforeQueryResult
         if err := json.Unmarshal(output, &result); err != nil {
-            r.logger.Error().Err(err).Msg("hook returned invalid JSON")
-            continue
+            return "", fmt.Errorf("before_query hook returned unparseable response (command: %s): %w", hook.command, err)
         }
+
+        // Hook explicitly rejected the query.
         if !result.Accept {
             errMsg := "query rejected by hook"
             if result.ErrorMessage != "" {
@@ -538,7 +554,39 @@ func (r *Runner) RunBeforeQuery(ctx context.Context, query string) (string, erro
 }
 ```
 
-AfterQuery follows the same pattern but with `AfterQueryResult` and result string.
+**AfterQuery follows the same pattern** but with `AfterQueryResult` and result string. Same error treatment — crash, timeout, non-zero exit, or unparseable response all stop the pipeline:
+
+```go
+func (r *Runner) RunAfterQuery(ctx context.Context, resultJSON string) (string, error) {
+    current := resultJSON
+    for _, hook := range r.afterQuery {
+        if !hook.pattern.MatchString(current) {
+            continue
+        }
+        output, err := r.executeHook(ctx, hook, current)
+        if err != nil {
+            return "", fmt.Errorf("after_query hook error: %w", err)
+        }
+
+        var result AfterQueryResult
+        if err := json.Unmarshal(output, &result); err != nil {
+            return "", fmt.Errorf("after_query hook returned unparseable response (command: %s): %w", hook.command, err)
+        }
+
+        if !result.Accept {
+            errMsg := "result rejected by hook"
+            if result.ErrorMessage != "" {
+                errMsg = result.ErrorMessage
+            }
+            return "", errors.New(errMsg)
+        }
+        if result.ModifiedResult != "" {
+            current = result.ModifiedResult
+        }
+    }
+    return current, nil
+}
+```
 
 ### 2.3 Sanitization Engine
 
@@ -741,7 +789,7 @@ func (p *PostgresMcp) Close()
    - `hooks.NewRunner(hooks.Config{DefaultTimeout: time.Duration(config.Hooks.DefaultTimeoutSeconds) * time.Second, ...}, logger)`
    - `sanitize.NewSanitizer(mapSanitizationRules(config.Sanitization))`
    - `errprompt.NewMatcher(mapErrorPromptRules(config.ErrorPrompts))`
-   - `timeout.NewManager(timeout.Config{DefaultTimeout: time.Duration(config.Query.DefaultTimeoutSeconds) * time.Second, ...})`
+   - `timeout.NewManager(timeout.Config{DefaultTimeout: time.Duration(config.Query.DefaultTimeoutSeconds) * time.Second, ListTablesTimeout: time.Duration(config.Query.ListTablesTimeoutSeconds) * time.Second, DescribeTableTimeout: time.Duration(config.Query.DescribeTableTimeoutSeconds) * time.Second, ...})`
 8. Return `*PostgresMcp`.
 
 ### 3.2 Query Tool
@@ -1013,6 +1061,34 @@ type ListTablesOutput struct {
 func (p *PostgresMcp) ListTables(ctx context.Context, input ListTablesInput) (*ListTablesOutput, error)
 ```
 
+**ListTables implementation:**
+
+```go
+func (p *PostgresMcp) ListTables(ctx context.Context, input ListTablesInput) (*ListTablesOutput, error) {
+    // 1. Acquire semaphore (same as Query — bounds total concurrent operations to pool size)
+    select {
+    case p.semaphore <- struct{}{}:
+    case <-ctx.Done():
+        return nil, ctx.Err()
+    }
+    defer func() { <-p.semaphore }()
+
+    // 2. Apply configurable timeout
+    queryCtx, cancel := context.WithTimeout(ctx, time.Duration(p.config.Query.ListTablesTimeoutSeconds)*time.Second)
+    defer cancel()
+
+    // 3. Acquire connection and execute
+    conn, err := p.pool.Acquire(queryCtx)
+    if err != nil {
+        return nil, fmt.Errorf("failed to acquire connection: %w", err)
+    }
+    defer conn.Release()
+
+    rows, err := conn.Query(queryCtx, listTablesSQL)
+    // ... scan rows ...
+}
+```
+
 **SQL query:**
 ```sql
 SELECT
@@ -1033,7 +1109,7 @@ WHERE c.relkind IN ('r', 'v', 'm', 'f')
 ORDER BY n.nspname, c.relname;
 ```
 
-ListTables does NOT go through the hook/protection/sanitization pipeline — it's a read-only metadata query using a hardcoded SQL. It uses a separate connection acquire with the default timeout.
+ListTables does NOT go through the hook/protection/sanitization pipeline — it's a read-only metadata query using a hardcoded SQL. It acquires the semaphore and uses `query.list_tables_timeout_seconds` for its timeout.
 
 ### 3.4 DescribeTable Tool
 
@@ -1092,7 +1168,34 @@ type DescribeTableOutput struct {
 func (p *PostgresMcp) DescribeTable(ctx context.Context, input DescribeTableInput) (*DescribeTableOutput, error)
 ```
 
-**Implementation:** Runs multiple `pg_catalog` queries for columns, indexes, constraints, and foreign keys. Uses parameterized queries with schema and table name. Does NOT go through the hook/protection/sanitization pipeline.
+**DescribeTable implementation:**
+
+```go
+func (p *PostgresMcp) DescribeTable(ctx context.Context, input DescribeTableInput) (*DescribeTableOutput, error) {
+    // 1. Acquire semaphore (same as Query — bounds total concurrent operations to pool size)
+    select {
+    case p.semaphore <- struct{}{}:
+    case <-ctx.Done():
+        return nil, ctx.Err()
+    }
+    defer func() { <-p.semaphore }()
+
+    // 2. Apply configurable timeout
+    queryCtx, cancel := context.WithTimeout(ctx, time.Duration(p.config.Query.DescribeTableTimeoutSeconds)*time.Second)
+    defer cancel()
+
+    // 3. Acquire connection and execute
+    conn, err := p.pool.Acquire(queryCtx)
+    if err != nil {
+        return nil, fmt.Errorf("failed to acquire connection: %w", err)
+    }
+    defer conn.Release()
+
+    // ... run multiple pg_catalog queries ...
+}
+```
+
+**Implementation:** Runs multiple `pg_catalog` queries for columns, indexes, constraints, and foreign keys. Uses parameterized queries with schema and table name. Does NOT go through the hook/protection/sanitization pipeline. Acquires the semaphore and uses `query.describe_table_timeout_seconds` for its timeout.
 
 Must fully support **tables, views, materialized views, and foreign tables** — the goal is for AI agents to have complete information to craft queries. The approach differs by object type:
 
@@ -1272,16 +1375,26 @@ func runServe() error {
 
 **Health check implementation:**
 
-Since mcp-go's `StreamableHTTPServer` manages its own HTTP server, we need to either:
-- Use `server.WithStreamableHTTPServer(customHTTPServer)` to pass a custom `http.Server` with a mux that also handles the health check path, OR
-- Use the built-in mcp-go health check if available
+**Critical mcp-go behavior (verified by test `mcphttp_test.go`):**
 
-Approach: Create a custom `http.ServeMux`, register the health check handler, then use `WithStreamableHTTPServer` to pass a custom `*http.Server` that uses this mux. The mcp-go StreamableHTTP handler is mounted at its endpoint path on this mux.
+When `Start()` is called WITHOUT a custom `*http.Server` (i.e., `WithStreamableHTTPServer` not used), it creates its own `http.ServeMux`, registers the `StreamableHTTPServer` as a handler at `endpointPath`, and creates a new `http.Server`. However, when a custom `*http.Server` IS provided via `WithStreamableHTTPServer`, `Start()` **does NOT register any handler** — it only checks for address conflicts and calls `ListenAndServe()`. This means the MCP handler must be manually registered on the custom server's mux.
+
+Source: [mcp-go `Start()` source code](https://github.com/mark3labs/mcp-go/blob/main/server/streamable_http.go) — the `if s.httpServer == nil` branch creates the mux and registers the handler; the `else` branch (custom server) skips handler registration entirely.
+
+This was verified with two tests in `mcphttp_test.go`:
+- `TestStreamableHTTP_CustomServer_DoesNotRegisterHandler` — confirms MCP endpoint returns 404 when custom server provided without manual registration
+- `TestStreamableHTTP_ManualRegistration_Works` — confirms the correct approach works: manual `mux.Handle("/mcp", streamableServer)` + health check on the same mux
+
+**Correct approach:** Create the mux, register both health check and the `StreamableHTTPServer` (which implements `http.Handler` via `ServeHTTP`), then pass the custom `http.Server` via `WithStreamableHTTPServer`. Order matters — the `StreamableHTTPServer` must be created before it can be registered on the mux, but the custom `http.Server` must be passed at construction time. Solution: create the `http.Server` first with the mux, pass it to the constructor, then register the handler on the mux.
 
 ```go
+addr := fmt.Sprintf(":%d", config.Server.Port)
+
+// Step 1: Create the mux.
 mux := http.NewServeMux()
 
-// Health check — confirms MCP server process is running and responsive.
+// Step 2: Register health check on the mux (if enabled).
+// Health check confirms MCP server process is running and responsive.
 // Does NOT check database connectivity (by design — documented in requirements).
 if config.Server.HealthCheckEnabled {
     mux.HandleFunc(config.Server.HealthCheckPath, func(w http.ResponseWriter, r *http.Request) {
@@ -1295,15 +1408,27 @@ if config.Server.HealthCheckEnabled {
 // Not setting CORS headers is intentional: it prevents malicious webpages from
 // making requests to an accidentally-exposed server (which has no auth).
 
-// MCP endpoint — mount the StreamableHTTP handler
-httpServer := server.NewStreamableHTTPServer(mcpServer,
+// Step 3: Create the custom http.Server with the mux.
+httpSrv := &http.Server{
+    Addr:    addr,
+    Handler: mux,
+}
+
+// Step 4: Create the StreamableHTTPServer with the custom http.Server.
+streamableServer := server.NewStreamableHTTPServer(mcpServer,
     server.WithEndpointPath("/mcp"),
     server.WithStateLess(),
-    server.WithStreamableHTTPServer(&http.Server{
-        Addr:    fmt.Sprintf(":%d", config.Server.Port),
-        Handler: mux,
-    }),
+    server.WithStreamableHTTPServer(httpSrv),
 )
+
+// Step 5: Manually register the StreamableHTTPServer on the mux.
+// This is REQUIRED because Start() does NOT register the handler when
+// a custom *http.Server is provided via WithStreamableHTTPServer.
+mux.Handle("/mcp", streamableServer)
+
+// Step 6: Start listening.
+logger.Info().Int("port", config.Server.Port).Msg("starting gopgmcp server")
+return streamableServer.Start(addr)
 ```
 
 ### 5.3 Configure Command
@@ -1387,6 +1512,13 @@ echo '{"accept": true}'
 ```bash
 #!/bin/bash
 exit 1
+```
+
+**File: `testdata/hooks/bad_json.sh`**
+```bash
+#!/bin/bash
+cat /dev/stdin > /dev/null
+echo 'this is not valid json'
 ```
 
 **File: `testdata/hooks/echo_args.sh`**
@@ -1563,19 +1695,21 @@ Tests use the shell scripts in `testdata/hooks/`. All scripts must be `chmod +x`
 | `TestBeforeQuery_PatternNoMatch` | accept.sh, pattern `NEVER_MATCH` | hook not executed, query passes through unchanged |
 | `TestBeforeQuery_Chaining` | [modify_query.sh, accept.sh] | second hook receives `"SELECT 1 AS modified"` as input |
 | `TestBeforeQuery_ChainPatternReEval` | [modify_query.sh (pattern `.*`), reject.sh (pattern `modified`)] | second hook matches modified query, error: `"rejected by test hook"` |
-| `TestBeforeQuery_Timeout` | slow.sh, timeout=1s | hook times out, logged, query continues unchanged |
-| `TestBeforeQuery_Crash` | crash.sh, pattern `.*` | hook fails, logged, query continues unchanged |
+| `TestBeforeQuery_Timeout` | slow.sh, timeout=1s | error returned: `"before_query hook error: hook timed out: ..."` — pipeline stops |
+| `TestBeforeQuery_Crash` | crash.sh, pattern `.*` | error returned: `"before_query hook error: hook failed (command: ...)"` — pipeline stops |
+| `TestBeforeQuery_UnparseableResponse` | script that outputs `not json`, pattern `.*` | error returned: `"before_query hook returned unparseable response (command: ...)"` — pipeline stops |
 | `TestAfterQuery_Accept` | accept.sh | result passes through unchanged |
 | `TestAfterQuery_Reject` | reject.sh | error returned: `"rejected by test hook"` |
 | `TestAfterQuery_ModifyResult` | modify_result.sh | result changed to modified JSON |
 | `TestAfterQuery_Chaining` | [modify_result.sh, accept.sh] | second hook receives modified result as input |
-| `TestAfterQuery_Timeout` | slow.sh, timeout=1s | times out, logged, result continues unchanged |
-| `TestAfterQuery_Crash` | crash.sh | fails, logged, result continues unchanged |
+| `TestAfterQuery_Timeout` | slow.sh, timeout=1s | error returned: `"after_query hook error: hook timed out: ..."` — pipeline stops |
+| `TestAfterQuery_Crash` | crash.sh | error returned: `"after_query hook error: hook failed (command: ...)"` — pipeline stops |
+| `TestAfterQuery_UnparseableResponse` | script that outputs `not json`, pattern `.*` | error returned: `"after_query hook returned unparseable response (command: ...)"` — pipeline stops |
 | `TestHookStdinInput` | custom script that echoes stdin back | verify raw SQL query string passed as stdin for BeforeQuery |
 | `TestHookWithArgs` | echo_args.sh, args: `["--flag", "value"]` | modified_query contains `"ARGS: --flag value"` |
 | `TestHookWithEmptyArgs` | accept.sh, args: `[]` | works same as no args, query passes through |
-| `TestHookDefaultTimeout` | slow.sh with no per-hook timeout, default=1s | uses default timeout, hook times out, query continues |
-| `TestHookPerHookTimeoutOverridesDefault` | slow.sh with per-hook timeout=2s, default=1s | uses per-hook timeout (2s), hook still times out (sleep 30) |
+| `TestHookDefaultTimeout` | slow.sh with no per-hook timeout, default=1s | error returned — uses default timeout, hook times out, pipeline stops |
+| `TestHookPerHookTimeoutOverridesDefault` | slow.sh with per-hook timeout=2s, default=1s | error returned — uses per-hook timeout (2s), hook still times out (sleep 30), pipeline stops |
 | `TestHookPanicOnZeroDefaultTimeout` | config with hooks but default_timeout=0 | NewRunner panics |
 | `TestHasAfterQueryHooks_True` | config with AfterQuery hooks | `HasAfterQueryHooks()` returns `true` |
 | `TestHasAfterQueryHooks_False` | config with no AfterQuery hooks | `HasAfterQueryHooks()` returns `false` |
@@ -1614,6 +1748,8 @@ Tests use the shell scripts in `testdata/hooks/`. All scripts must be `chmod +x`
 | `TestLoadConfigValidation_ZeroMaxConns` | config with pool.max_conns = 0 | panics with message containing `"pool.max_conns"` |
 | `TestLoadConfigValidation_ZeroDefaultTimeout` | config with `default_timeout_seconds` = 0 | panics with message containing `"default_timeout_seconds"` |
 | `TestLoadConfigValidation_MissingDefaultTimeout` | config without `default_timeout_seconds` | panics with message containing `"default_timeout_seconds"` (no default, must be set) |
+| `TestLoadConfigValidation_ZeroListTablesTimeout` | config with `list_tables_timeout_seconds` = 0 | panics with message containing `"list_tables_timeout_seconds"` |
+| `TestLoadConfigValidation_ZeroDescribeTableTimeout` | config with `describe_table_timeout_seconds` = 0 | panics with message containing `"describe_table_timeout_seconds"` |
 | `TestLoadConfigValidation_NegativeTimeout` | negative timeout value | panics with message containing `"timeout"` |
 | `TestLoadConfigValidation_ZeroHookDefaultTimeout` | hooks configured but `hooks.default_timeout_seconds` = 0 | panics with message containing `"hooks.default_timeout_seconds"` |
 | `TestLoadConfigValidation_MissingHookDefaultTimeout` | hooks configured but `hooks.default_timeout_seconds` omitted | panics with message containing `"hooks.default_timeout_seconds"` (no default, must be set) |
@@ -1652,6 +1788,9 @@ Run with: `go test -tags=integration -race -v ./...`
 | `TestQuery_TimeoutRuleMatch` | Config with timeout rule matching query | Slow query | Uses rule timeout, not default |
 | `TestQuery_ProtectionEndToEnd` | Table | `DROP TABLE users` | Error: `"DROP statements are not allowed"` |
 | `TestQuery_HooksEndToEnd` | Config with real hook scripts | Query matching hook pattern | Hook executed, result correct |
+| `TestQuery_HookCrashStopsPipeline` | Config with crash.sh hook | Any query matching hook | Error contains `"hook failed"` — query not executed |
+| `TestQuery_HookTimeoutStopsPipeline` | Config with slow.sh, timeout=1s | Any query matching hook | Error contains `"hook timed out"` — query not executed |
+| `TestQuery_HookBadJsonStopsPipeline` | Config with bad_json.sh hook | Any query matching hook | Error contains `"unparseable response"` — query not executed |
 | `TestQuery_SanitizationEndToEnd` | Table with phone numbers | `SELECT phone FROM contacts` | Phone numbers sanitized per regex rules |
 | `TestQuery_ErrorPromptEndToEnd` | No table | `SELECT * FROM nonexistent` | Error contains both Postgres error and appended prompt message |
 | `TestQuery_MaxResultLength` | Table with many rows | `SELECT * FROM large_table` | Result truncated, error contains `"[truncated] Result is too long!"` |
@@ -1676,6 +1815,8 @@ Run with: `go test -tags=integration -race -v ./...`
 | `TestListTables_IncludesMaterializedViews` | Create mat view | Included with type "materialized_view" |
 | `TestListTables_ExcludesSystemTables` | Default DB | No pg_catalog/information_schema tables |
 | `TestListTables_Empty` | Empty database (no user tables) | Empty list |
+| `TestListTables_Timeout` | Config with list_tables_timeout=1s, `pg_sleep` in custom view or slow DB | Error contains context deadline exceeded |
+| `TestListTables_AcquiresSemaphore` | Config max_conns=1, hold semaphore in another goroutine | ListTables blocks, then succeeds when semaphore released; or times out if held too long |
 
 #### DescribeTable Integration Tests
 
@@ -1694,6 +1835,8 @@ Run with: `go test -tags=integration -race -v ./...`
 | `TestDescribeTable_MaterializedView` | Materialized view over users | Type="materialized_view", columns from pg_attribute (not information_schema), Definition contains SQL, indexes listed (matviews can have indexes) |
 | `TestDescribeTable_MaterializedViewWithIndex` | Matview + CREATE INDEX | Index listed in indexes array |
 | `TestDescribeTable_ForeignTable` | Foreign table (if pg_fdw available) | Type="foreign_table", columns listed |
+| `TestDescribeTable_Timeout` | Config with describe_table_timeout=1s, table with slow function-based defaults or slow DB | Error contains context deadline exceeded |
+| `TestDescribeTable_AcquiresSemaphore` | Config max_conns=1, hold semaphore in another goroutine | DescribeTable blocks, then succeeds when semaphore released; or times out if held too long |
 
 #### Full Pipeline Integration Test
 
@@ -1709,6 +1852,7 @@ Run with: `go test -tags=integration -race -v ./...`
 | `TestMCPServer_ListTablesTool` | Same for list_tables |
 | `TestMCPServer_DescribeTableTool` | Same for describe_table |
 | `TestMCPServer_HealthCheck` | GET health check endpoint, verify 200 OK |
+| `TestMCPServer_HealthCheckAndMCPCoexist` | Both health check AND MCP endpoint respond correctly on the same port (verifies manual mux registration approach) |
 | `TestMCPServer_ToolsList` | `tools/list` returns all 3 tools with correct schemas |
 
 ---
@@ -1862,7 +2006,7 @@ Must include:
    - Hook commands are executed directly (not through a shell). The `command` field is the executable path, `args` is an array of arguments passed separately.
    - If a hook author does something reckless like `eval $(cat /dev/stdin)`, that's on them. The MCP server itself doesn't create the vulnerability.
    - Hook timeout is enforced. Default hook timeout must be > 0 — server refuses to start otherwise.
-   - When a hook crashes or times out, it is logged and skipped — does not block the pipeline.
+   - When a hook crashes, times out, returns non-zero exit code, or returns unparseable content, the entire query pipeline is stopped and the query is rejected with a descriptive error. Hooks are critical guardrails — a failing hook means the guardrail cannot verify the query/result.
 
 5. **Health check documentation:**
    - Health check endpoint confirms the MCP server process is running and HTTP is responsive.

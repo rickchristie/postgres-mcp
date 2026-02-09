@@ -33,10 +33,14 @@ Create Postgres MCP with Golang.
   - ListTables:
     - Returns list of tables in the connected database (includes views, materialized views, foreign tables).
     - Can list everything that is granted to the connected user.
+    - Must acquire semaphore before executing (same semaphore as Query — ensures total concurrent operations are bounded by pool size).
+    - Must have a configurable timeout (`list_tables_timeout_seconds`). Must be > 0, no default — user must explicitly set in config. Server panics on start if not set.
   - DescribeTable:
     - Returns table schema for the specified table.
     - Returns everything including indexes, constraints, foreign keys, etc.
     - Can describe everything that is granted to the connected user.
+    - Must acquire semaphore before executing (same semaphore as Query — ensures total concurrent operations are bounded by pool size).
+    - Must have a configurable timeout (`describe_table_timeout_seconds`). Must be > 0, no default — user must explicitly set in config. Server panics on start if not set.
 - Reads config file and `gopgmcp configure` command to help create the config file:
   - Config file located at `<workdir>/.gopgmcp/config.json`. Will read it from working directory.
     - This can be overridden by environment variable `GOPGMCP_CONFIG_PATH`.
@@ -78,7 +82,8 @@ Create Postgres MCP with Golang.
       - Hooks are matched against the RAW result first, then executed. If the result is modified, the next hook will be matched against the modified result.
     - Each hook entry specifies the command path and optional arguments array. The command is executed directly via Go's exec.Command (no shell), with arguments passed separately.
     - Hook timeout in seconds. Applies per hook. If not specified, falls back to default hook timeout. Default hook timeout must be > 0, no default value — user must explicitly set this in config when hooks are configured. Server panics on start if hooks exist and this is not set.
-    - When 1 hook crashes/times out, it does not stop the whole process, just log the error and continue.
+    - When 1 hook crashes, times out, returns non-zero exit code, or returns unparseable (non-JSON) content, the entire query pipeline stops and is treated as an error. Hooks are a critical part of the guardrails — a failing hook means the guardrail cannot verify the query/result, so the safe default is to reject.
+      - The error message must be descriptive: include which hook failed, the command path, and the reason (crash, timeout, bad exit code, parse error).
     - The number of hooks being run is equal to the amount of connection in the pgxpool:
       - The system reads pgxpool config of max connections - it then forces a lock that for that amount that encompasses the transaction, Before and After hooks.
       - This ensures predictable resource usage when deployed.
@@ -163,6 +168,8 @@ Create Postgres MCP with Golang.
     },
     "query": {
       "default_timeout_seconds": 30,
+      "list_tables_timeout_seconds": 10,
+      "describe_table_timeout_seconds": 10,
       "max_result_length": 100000,
       "timeout_rules": [
         {
