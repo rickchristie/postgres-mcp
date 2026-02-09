@@ -127,9 +127,10 @@ type Config struct {
 }
 
 type ConnectionConfig struct {
-    Host   string `json:"host"`
-    Port   int    `json:"port"`
-    DBName string `json:"dbname"`
+    Host    string `json:"host"`
+    Port    int    `json:"port"`
+    DBName  string `json:"dbname"`
+    SSLMode string `json:"sslmode"`
 }
 
 type PoolConfig struct {
@@ -154,12 +155,12 @@ type LoggingConfig struct {
 }
 
 type ProtectionConfig struct {
-    BlockSet             bool `json:"block_set"`
-    BlockDrop            bool `json:"block_drop"`
-    BlockTruncate        bool `json:"block_truncate"`
-    BlockDo              bool `json:"block_do"`
-    RequireWhereOnDelete bool `json:"require_where_on_delete"`
-    RequireWhereOnUpdate bool `json:"require_where_on_update"`
+    AllowSet                bool `json:"allow_set"`
+    AllowDrop               bool `json:"allow_drop"`
+    AllowTruncate           bool `json:"allow_truncate"`
+    AllowDo                 bool `json:"allow_do"`
+    AllowDeleteWithoutWhere bool `json:"allow_delete_without_where"`
+    AllowUpdateWithoutWhere bool `json:"allow_update_without_where"`
 }
 
 type QueryConfig struct {
@@ -206,7 +207,7 @@ type HookEntry struct {
 5. Return descriptive errors on validation failure
 
 **Config defaults** (applied when fields are zero-value):
-- `protection.*` → all `true` (defaults on, including `block_do`)
+- `protection.*` → all `false` (Go zero-value = blocked, safe default; set to `true` to allow specific operations)
 - `query.default_timeout_seconds` → `30`
 - `query.max_result_length` → `100000`
 - `server.health_check_path` → `/health-check`
@@ -214,6 +215,7 @@ type HookEntry struct {
 
 **Config validation** (server panics on start if any fail):
 - `server.port` must be specified and > 0
+- `pool.max_conns` must be > 0 — a zero-capacity semaphore would deadlock all queries
 - `hooks.default_timeout_seconds` must be > 0 if any hooks are configured — running hooks without a timeout is not allowed
 - All regex patterns must compile successfully
 - All timeout values must be > 0
@@ -226,20 +228,28 @@ type HookEntry struct {
 
 **File: `internal/protection/protection.go`**
 
+Each internal package defines its own config type to avoid circular imports with the parent `pgmcp` package. The `pgmcp` package maps its config to internal configs when constructing components.
+
 ```go
 package protection
 
-type Checker struct {
-    blockSet             bool
-    blockDrop            bool
-    blockTruncate        bool
-    blockDo              bool
-    requireWhereOnDelete bool
-    requireWhereOnUpdate bool
-    readOnly             bool
+// Config is the protection checker's own config type.
+// The pgmcp package maps ProtectionConfig + ServerConfig.ReadOnly → this.
+type Config struct {
+    AllowSet                bool
+    AllowDrop               bool
+    AllowTruncate           bool
+    AllowDo                 bool
+    AllowDeleteWithoutWhere bool
+    AllowUpdateWithoutWhere bool
+    ReadOnly                bool
 }
 
-func NewChecker(config pgmcp.ProtectionConfig, readOnly bool) *Checker
+type Checker struct {
+    config Config
+}
+
+func NewChecker(config Config) *Checker
 
 // Check parses SQL with pg_query_go and walks the AST.
 // Returns nil if allowed, descriptive error if blocked.
@@ -266,7 +276,7 @@ for _, rawStmt := range result.Stmts {
 
         // readOnly: block RESET ALL and RESET default_transaction_read_only
         // (VAR_RESET / VAR_RESET_ALL kinds)
-        if c.readOnly {
+        if c.config.ReadOnly {
             if varSetStmt.Kind == pg_query.VariableSetKind_VAR_RESET_ALL {
                 return fmt.Errorf("RESET ALL is blocked in read-only mode: could disable read-only transaction setting")
             }
@@ -278,38 +288,51 @@ for _, rawStmt := range result.Stmts {
                 return fmt.Errorf("SET %s is blocked in read-only mode: cannot change transaction read-only setting", varSetStmt.Name)
             }
         }
-        if c.blockSet {
-            return fmt.Errorf("SET statements are not allowed: SET %s", varSetStmt.Name)
+        if !c.config.AllowSet {
+            switch varSetStmt.Kind {
+            case pg_query.VariableSetKind_VAR_RESET_ALL:
+                return fmt.Errorf("RESET ALL is not allowed")
+            case pg_query.VariableSetKind_VAR_RESET:
+                return fmt.Errorf("RESET statements are not allowed: RESET %s", varSetStmt.Name)
+            default:
+                return fmt.Errorf("SET statements are not allowed: SET %s", varSetStmt.Name)
+            }
         }
 
     case *pg_query.Node_DropStmt:
-        if c.blockDrop {
+        if !c.config.AllowDrop {
             return fmt.Errorf("DROP statements are not allowed")
         }
 
+    case *pg_query.Node_DropdbStmt:
+        // DROP DATABASE is a separate AST node from generic DROP.
+        if !c.config.AllowDrop {
+            return fmt.Errorf("DROP DATABASE is not allowed")
+        }
+
     case *pg_query.Node_TruncateStmt:
-        if c.blockTruncate {
+        if !c.config.AllowTruncate {
             return fmt.Errorf("TRUNCATE statements are not allowed")
         }
 
     case *pg_query.Node_DoStmt:
-        if c.blockDo {
+        if !c.config.AllowDo {
             return fmt.Errorf("DO $$ blocks are not allowed: DO blocks can execute arbitrary SQL bypassing protection checks")
         }
 
     case *pg_query.Node_DeleteStmt:
-        if c.requireWhereOnDelete && node.DeleteStmt.WhereClause == nil {
+        if !c.config.AllowDeleteWithoutWhere && node.DeleteStmt.WhereClause == nil {
             return fmt.Errorf("DELETE without WHERE clause is not allowed")
         }
 
     case *pg_query.Node_UpdateStmt:
-        if c.requireWhereOnUpdate && node.UpdateStmt.WhereClause == nil {
+        if !c.config.AllowUpdateWithoutWhere && node.UpdateStmt.WhereClause == nil {
             return fmt.Errorf("UPDATE without WHERE clause is not allowed")
         }
 
     case *pg_query.Node_TransactionStmt:
         // readOnly: block BEGIN READ WRITE / START TRANSACTION READ WRITE
-        if c.readOnly {
+        if c.config.ReadOnly {
             txStmt := node.TransactionStmt
             for _, opt := range txStmt.Options {
                 if defElem, ok := opt.Node.(*pg_query.Node_DefElem); ok {
@@ -342,6 +365,21 @@ func isTransactionReadOnlyVar(name string) bool {
 ```go
 package hooks
 
+// Config is the hook runner's own config type.
+// The pgmcp package maps HooksConfig → this, converting seconds to time.Duration.
+type Config struct {
+    DefaultTimeout time.Duration
+    BeforeQuery    []HookEntry
+    AfterQuery     []HookEntry
+}
+
+type HookEntry struct {
+    Pattern string
+    Command string
+    Args    []string
+    Timeout time.Duration // 0 means use DefaultTimeout
+}
+
 type BeforeQueryResult struct {
     Accept        bool   `json:"accept"`
     ModifiedQuery string `json:"modified_query,omitempty"`
@@ -368,10 +406,14 @@ type Runner struct {
     logger         zerolog.Logger
 }
 
-func NewRunner(config pgmcp.HooksConfig, logger zerolog.Logger) (*Runner, error)
+func NewRunner(config Config, logger zerolog.Logger) (*Runner, error)
 // Compiles all regex patterns, returns error on invalid regex.
-// For each hook: if TimeoutSeconds > 0, uses that; otherwise falls back to config.DefaultTimeoutSeconds.
-// Panics if config.DefaultTimeoutSeconds == 0 and any hook exists (validated at config load, but defense-in-depth).
+// For each hook: if Timeout > 0, uses that; otherwise falls back to config.DefaultTimeout.
+// Panics if config.DefaultTimeout == 0 and any hook exists (validated at config load, but defense-in-depth).
+
+// HasAfterQueryHooks returns true if any AfterQuery hooks are configured.
+// Used by the query pipeline to skip JSON serialization round-trip when no hooks exist.
+func (r *Runner) HasAfterQueryHooks() bool
 
 // RunBeforeQuery runs matching BeforeQuery hooks in middleware chain.
 // Returns the (possibly modified) query string.
@@ -445,6 +487,13 @@ AfterQuery follows the same pattern but with `AfterQueryResult` and result strin
 ```go
 package sanitize
 
+// Rule is the sanitizer's own rule type.
+// The pgmcp package maps SanitizationRule → this.
+type Rule struct {
+    Pattern     string
+    Replacement string
+}
+
 type compiledRule struct {
     pattern     *regexp.Regexp
     replacement string
@@ -454,7 +503,7 @@ type Sanitizer struct {
     rules []compiledRule
 }
 
-func NewSanitizer(rules []pgmcp.SanitizationRule) (*Sanitizer, error)
+func NewSanitizer(rules []Rule) (*Sanitizer, error)
 // Compiles all regex patterns.
 
 // SanitizeRows applies sanitization to each field value in the result rows.
@@ -487,7 +536,9 @@ func (s *Sanitizer) sanitizeValue(v interface{}) interface{} {
         }
         return val
     default:
-        // Numeric, bool, nil — return as-is
+        // Numeric, bool, nil, json.Number — return as-is.
+        // json.Number (from UseNumber()) is type `string` underneath but does NOT
+        // match `case string:` in Go type switches, so it correctly passes through.
         return v
     }
 }
@@ -500,6 +551,13 @@ func (s *Sanitizer) sanitizeValue(v interface{}) interface{} {
 ```go
 package errprompt
 
+// Rule is the error prompt matcher's own rule type.
+// The pgmcp package maps ErrorPromptRule → this.
+type Rule struct {
+    Pattern string
+    Message string
+}
+
 type compiledRule struct {
     pattern *regexp.Regexp
     message string
@@ -509,7 +567,7 @@ type Matcher struct {
     rules []compiledRule
 }
 
-func NewMatcher(rules []pgmcp.ErrorPromptRule) (*Matcher, error)
+func NewMatcher(rules []Rule) (*Matcher, error)
 
 // Match checks error message against all rules (top to bottom).
 // Returns concatenation of all matching prompt messages.
@@ -524,6 +582,19 @@ func (m *Matcher) Match(errMsg string) string
 ```go
 package timeout
 
+// Rule is the timeout manager's own rule type.
+// The pgmcp package maps TimeoutRule → this, converting seconds to time.Duration.
+type Rule struct {
+    Pattern string
+    Timeout time.Duration
+}
+
+// Config is the timeout manager's own config type.
+type Config struct {
+    DefaultTimeout time.Duration
+    Rules          []Rule
+}
+
 type compiledRule struct {
     pattern *regexp.Regexp
     timeout time.Duration
@@ -534,7 +605,7 @@ type Manager struct {
     defaultTimeout time.Duration
 }
 
-func NewManager(config pgmcp.QueryConfig) (*Manager, error)
+func NewManager(config Config) (*Manager, error)
 
 // GetTimeout returns the timeout for the given SQL.
 // First matching rule wins. Falls back to default.
@@ -599,13 +670,19 @@ func (p *PostgresMcp) Close()
 ```
 
 **New() logic:**
-1. Build connection string: if `connString` is non-empty, use it. Otherwise build from `config.Connection` fields.
-2. Configure `pgxpool.Config`: apply pool settings, set `DefaultQueryExecMode` to `pgx.QueryExecModeExec`.
-3. If `config.Server.ReadOnly`, set `AfterConnect` hook to run `SET default_transaction_read_only = on` on each connection.
-4. Create `pgxpool.Pool`.
-5. Create semaphore: `make(chan struct{}, config.Pool.MaxConns)` — bounds concurrent query pipelines.
-6. Initialize all internal components: `protection.NewChecker`, `hooks.NewRunner`, `sanitize.NewSanitizer`, `errprompt.NewMatcher`, `timeout.NewManager`.
-7. Return `*PostgresMcp`.
+1. Validate: if `config.Pool.MaxConns <= 0`, panic (`"pool.max_conns must be > 0"`).
+2. Build connection string: if `connString` is non-empty, use it. Otherwise build from `config.Connection` fields (host, port, dbname, sslmode).
+3. Configure `pgxpool.Config`: apply pool settings, set `DefaultQueryExecMode` to `pgx.QueryExecModeExec`.
+4. If `config.Server.ReadOnly`, set `AfterConnect` hook to run `SET default_transaction_read_only = on` on each connection.
+5. Create `pgxpool.Pool`.
+6. Create semaphore: `make(chan struct{}, config.Pool.MaxConns)` — bounds concurrent query pipelines.
+7. Initialize all internal components, mapping pgmcp config types to internal package config types:
+   - `protection.NewChecker(protection.Config{AllowSet: config.Protection.AllowSet, ..., ReadOnly: config.Server.ReadOnly})`
+   - `hooks.NewRunner(hooks.Config{DefaultTimeout: time.Duration(config.Hooks.DefaultTimeoutSeconds) * time.Second, ...}, logger)`
+   - `sanitize.NewSanitizer(mapSanitizationRules(config.Sanitization))`
+   - `errprompt.NewMatcher(mapErrorPromptRules(config.ErrorPrompts))`
+   - `timeout.NewManager(timeout.Config{DefaultTimeout: time.Duration(config.Query.DefaultTimeoutSeconds) * time.Second, ...})`
+8. Return `*PostgresMcp`.
 
 ### 3.2 Query Tool
 
@@ -672,9 +749,9 @@ func (p *PostgresMcp) Query(ctx context.Context, input QueryInput) *QueryOutput 
     if err != nil {
         return p.handleError(err)
     }
-    defer tx.Rollback(queryCtx) // no-op if committed
+    defer tx.Rollback(ctx) // use parent ctx, not queryCtx — if query timed out, queryCtx is cancelled and rollback would fail
 
-    rows, err := tx.Query(queryCtx, sql, pgx.QueryExecModeExec)
+    rows, err := tx.Query(queryCtx, sql)
     if err != nil {
         return p.handleError(err)
     }
@@ -689,31 +766,41 @@ func (p *PostgresMcp) Query(ctx context.Context, input QueryInput) *QueryOutput 
         return p.handleError(err)
     }
 
-    // 7. Serialize to JSON for AfterQuery hooks (complete result: columns + rows + error)
-    resultJSON, err := json.Marshal(result)
-    if err != nil {
-        return p.handleError(err)
-    }
+    // 7-9. AfterQuery hooks — only serialize/deserialize if hooks are configured.
+    // This avoids unnecessary JSON round-trip that would lose numeric precision.
+    var finalResult *QueryOutput
+    if p.hooks.HasAfterQueryHooks() {
+        // Serialize to JSON for AfterQuery hooks (complete result: columns + rows + error)
+        resultJSON, err := json.Marshal(result)
+        if err != nil {
+            return p.handleError(err)
+        }
 
-    // 8. Run AfterQuery hooks (middleware chain)
-    modifiedJSON, err := p.hooks.RunAfterQuery(ctx, string(resultJSON))
-    if err != nil {
-        return p.handleError(err)
-    }
+        // Run AfterQuery hooks (middleware chain)
+        modifiedJSON, err := p.hooks.RunAfterQuery(ctx, string(resultJSON))
+        if err != nil {
+            return p.handleError(err)
+        }
 
-    // 9. Parse back modified result if hooks changed it
-    var finalResult QueryOutput
-    if err := json.Unmarshal([]byte(modifiedJSON), &finalResult); err != nil {
-        return p.handleError(err)
+        // Parse back modified result — use json.NewDecoder with UseNumber()
+        // to preserve numeric precision (prevents int64 → float64 lossy conversion).
+        finalResult = &QueryOutput{}
+        dec := json.NewDecoder(strings.NewReader(modifiedJSON))
+        dec.UseNumber()
+        if err := dec.Decode(finalResult); err != nil {
+            return p.handleError(err)
+        }
+    } else {
+        finalResult = result
     }
 
     // 10. Apply sanitization (per-field, recursive into JSONB/arrays)
     finalResult.Rows = p.sanitizer.SanitizeRows(finalResult.Rows)
 
     // 11. Apply max result length truncation (keeps partial data — may be garbled JSON but still useful for agents)
-    p.truncateIfNeeded(&finalResult)
+    p.truncateIfNeeded(finalResult)
 
-    return &finalResult
+    return finalResult
 }
 ```
 
@@ -751,11 +838,63 @@ func (p *PostgresMcp) collectRows(rows pgx.Rows) (*QueryOutput, error) {
 - `net.IPNet` → string
 - `pgtype.Numeric` → float64 or string
 - `[16]byte` (UUID) → formatted UUID string
+- `[]byte` → base64-encoded string (for bytea columns; also checks if content is valid JSON first for JSONB)
 - `map[string]interface{}` / `[]interface{}` → pass through (JSONB/arrays already parsed by pgx)
-- `string` that looks like JSON (for JSONB columns) → attempt `json.Unmarshal` into `map[string]interface{}` or `[]interface{}`; if fails, keep as string
+- `string` that looks like JSON (for JSONB columns) → attempt `json.NewDecoder` with `UseNumber()` to preserve numeric precision; if fails, keep as string
 - Other types → let `json.Marshal` handle
 
-**JSONB handling concern:** With `pgx.QueryExecModeExec` (simple protocol), pgx may return JSONB columns as raw `string` or `[]byte` instead of parsed Go maps, because the simple protocol skips the type description step that pgx uses for automatic type mapping. The `convertValue` function must handle this by checking if a `string` or `[]byte` value is valid JSON and unmarshaling it. This concern is validated by integration tests using pgflock (see `TestQuery_JSONBReturnType`).
+```go
+func convertValue(v interface{}) interface{} {
+    switch val := v.(type) {
+    case nil:
+        return nil
+    case time.Time:
+        return val.Format(time.RFC3339Nano)
+    case net.IPNet:
+        return val.String()
+    case pgtype.Numeric:
+        f, err := val.Float64Value()
+        if err == nil && f.Valid {
+            return f.Float64
+        }
+        return val.String()
+    case [16]byte:
+        // UUID
+        return fmt.Sprintf("%x-%x-%x-%x-%x", val[0:4], val[4:6], val[6:8], val[8:10], val[10:16])
+    case []byte:
+        // Check if it's JSONB content first (pgx may return JSONB as []byte with QueryExecModeExec)
+        if len(val) > 0 && (val[0] == '{' || val[0] == '[') {
+            dec := json.NewDecoder(bytes.NewReader(val))
+            dec.UseNumber()
+            var parsed interface{}
+            if err := dec.Decode(&parsed); err == nil {
+                return parsed
+            }
+        }
+        // Binary data (bytea) → base64-encoded string
+        return base64.StdEncoding.EncodeToString(val)
+    case string:
+        // For JSONB columns returned as strings by QueryExecModeExec
+        if len(val) > 0 && (val[0] == '{' || val[0] == '[') {
+            dec := json.NewDecoder(strings.NewReader(val))
+            dec.UseNumber()
+            var parsed interface{}
+            if err := dec.Decode(&parsed); err == nil {
+                return parsed
+            }
+        }
+        return val
+    case map[string]interface{}, []interface{}:
+        return val
+    default:
+        return val
+    }
+}
+```
+
+**JSONB handling concern:** With `pgx.QueryExecModeExec` (simple protocol), pgx may return JSONB columns as raw `string` or `[]byte` instead of parsed Go maps, because the simple protocol skips the type description step that pgx uses for automatic type mapping. The `convertValue` function handles this by checking if a `string` or `[]byte` value is valid JSON and unmarshaling it with `UseNumber()` to preserve numeric precision. This concern is validated by integration tests using pgflock (see `TestQuery_JSONBReturnType`).
+
+**[]byte / bytea handling:** Binary data that is not valid JSON is encoded as base64, which is the standard representation of binary data in JSON. This applies to bytea columns.
 
 **handleError logic:**
 ```go
@@ -1203,123 +1342,129 @@ echo "{\"accept\": true, \"modified_query\": \"ARGS: $*\"}"
 
 ### 6.1 Unit Tests: Protection (`internal/protection/protection_test.go`)
 
-All tests are pure unit tests — no database needed. Each test asserts both the result (blocked/allowed) and the **error message content** (descriptive, includes statement type and reason). This ensures errors are easy to debug for both developers and AI agents.
+All tests are pure unit tests — no database needed. Default config: all `Allow*` fields are `false` (blocked), `ReadOnly` is `false`. Each test asserts both the result (blocked/allowed) and the **exact error message content**. This ensures errors are easy to debug for both developers and AI agents.
 
 #### Multi-Statement Detection (always enforced)
 
-| Test | SQL | Expected Error Contains |
-|---|---|---|
-| `TestMultiStatement_TwoSelects` | `SELECT 1; SELECT 2` | `"multi-statement queries are not allowed: found 2 statements"` |
-| `TestMultiStatement_SelectAndDrop` | `SELECT 1; DROP TABLE users` | `"multi-statement queries are not allowed"` |
-| `TestMultiStatement_ThreeStatements` | `SELECT 1; SELECT 2; SELECT 3` | `"found 3 statements"` |
-| `TestMultiStatement_CannotBeDisabled` | `SELECT 1; SELECT 2` (all protections off) | still blocked — `"multi-statement queries are not allowed"` |
-| `TestMultiStatement_SingleAllowed` | `SELECT 1` | allowed |
-| `TestMultiStatement_EmptyStatements` | `;` or `;;` | parse error or multi-statement blocked |
+| Test | SQL | Config | Expected Error Contains |
+|---|---|---|---|
+| `TestMultiStatement_TwoSelects` | `SELECT 1; SELECT 2` | default | `"multi-statement queries are not allowed: found 2 statements"` |
+| `TestMultiStatement_SelectAndDrop` | `SELECT 1; DROP TABLE users` | default | `"multi-statement queries are not allowed: found 2 statements"` |
+| `TestMultiStatement_ThreeStatements` | `SELECT 1; SELECT 2; SELECT 3` | default | `"multi-statement queries are not allowed: found 3 statements"` |
+| `TestMultiStatement_CannotBeDisabled` | `SELECT 1; SELECT 2` | all Allow* = true | still blocked — `"multi-statement queries are not allowed: found 2 statements"` |
+| `TestMultiStatement_SingleAllowed` | `SELECT 1` | default | allowed |
+| `TestMultiStatement_EmptyStatements` | `;` or `;;` | default | error contains `"SQL parse error"` or `"multi-statement"` |
 
 #### DROP Protection
 
-| Test | SQL | Expected Error Contains |
-|---|---|---|
-| `TestBlockDrop_Table` | `DROP TABLE users` | `"DROP statements are not allowed"` |
-| `TestBlockDrop_Index` | `DROP INDEX idx_users` | `"DROP statements are not allowed"` |
-| `TestBlockDrop_Schema` | `DROP SCHEMA public` | `"DROP statements are not allowed"` |
-| `TestBlockDrop_Database` | `DROP DATABASE mydb` | `"DROP statements are not allowed"` |
-| `TestBlockDrop_CaseInsensitive` | `drop table users` | blocked |
-| `TestBlockDrop_WithComments` | `/* comment */ DROP TABLE users` | blocked |
-| `TestBlockDrop_IfExists` | `DROP TABLE IF EXISTS users` | blocked |
-| `TestBlockDrop_Cascade` | `DROP TABLE users CASCADE` | blocked |
-| `TestBlockDrop_Disabled` | `DROP TABLE users` (blockDrop=false) | allowed |
+| Test | SQL | Config | Expected Error Contains |
+|---|---|---|---|
+| `TestDrop_Table` | `DROP TABLE users` | default | `"DROP statements are not allowed"` |
+| `TestDrop_Index` | `DROP INDEX idx_users` | default | `"DROP statements are not allowed"` |
+| `TestDrop_Schema` | `DROP SCHEMA public` | default | `"DROP statements are not allowed"` |
+| `TestDrop_Database` | `DROP DATABASE mydb` | default | `"DROP DATABASE is not allowed"` |
+| `TestDrop_CaseInsensitive` | `drop table users` | default | `"DROP statements are not allowed"` |
+| `TestDrop_WithComments` | `/* comment */ DROP TABLE users` | default | `"DROP statements are not allowed"` |
+| `TestDrop_IfExists` | `DROP TABLE IF EXISTS users` | default | `"DROP statements are not allowed"` |
+| `TestDrop_Cascade` | `DROP TABLE users CASCADE` | default | `"DROP statements are not allowed"` |
+| `TestDrop_Allowed` | `DROP TABLE users` | AllowDrop=true | allowed |
+| `TestDrop_DatabaseAllowed` | `DROP DATABASE mydb` | AllowDrop=true | allowed |
 
 #### TRUNCATE Protection
 
-| Test | SQL | Expected Error Contains |
-|---|---|---|
-| `TestBlockTruncate` | `TRUNCATE users` | `"TRUNCATE statements are not allowed"` |
-| `TestBlockTruncate_Multiple` | `TRUNCATE users, orders` | `"TRUNCATE statements are not allowed"` |
-| `TestBlockTruncate_Cascade` | `TRUNCATE users CASCADE` | blocked |
-| `TestBlockTruncate_Disabled` | `TRUNCATE users` (blockTruncate=false) | allowed |
+| Test | SQL | Config | Expected Error Contains |
+|---|---|---|---|
+| `TestTruncate_Basic` | `TRUNCATE users` | default | `"TRUNCATE statements are not allowed"` |
+| `TestTruncate_Multiple` | `TRUNCATE users, orders` | default | `"TRUNCATE statements are not allowed"` |
+| `TestTruncate_Cascade` | `TRUNCATE users CASCADE` | default | `"TRUNCATE statements are not allowed"` |
+| `TestTruncate_Allowed` | `TRUNCATE users` | AllowTruncate=true | allowed |
 
 #### SET Protection
 
-| Test | SQL | Expected Error Contains |
-|---|---|---|
-| `TestBlockSet` | `SET search_path TO 'public'` | `"SET statements are not allowed: SET search_path"` |
-| `TestBlockSet_WorkMem` | `SET work_mem = '256MB'` | `"SET statements are not allowed: SET work_mem"` |
-| `TestBlockSet_Reset` | `RESET ALL` | `"SET statements are not allowed"` |
-| `TestBlockSet_ResetSingle` | `RESET work_mem` | blocked |
-| `TestBlockSet_Disabled` | `SET work_mem = '256MB'` (blockSet=false) | allowed |
+| Test | SQL | Config | Expected Error Contains |
+|---|---|---|---|
+| `TestSet_SearchPath` | `SET search_path TO 'public'` | default | `"SET statements are not allowed: SET search_path"` |
+| `TestSet_WorkMem` | `SET work_mem = '256MB'` | default | `"SET statements are not allowed: SET work_mem"` |
+| `TestSet_ResetAll` | `RESET ALL` | default | `"RESET ALL is not allowed"` |
+| `TestSet_ResetSingle` | `RESET work_mem` | default | `"RESET statements are not allowed: RESET work_mem"` |
+| `TestSet_Allowed` | `SET work_mem = '256MB'` | AllowSet=true | allowed |
+| `TestSet_ResetAllAllowed` | `RESET ALL` | AllowSet=true | allowed |
+| `TestSet_ResetSingleAllowed` | `RESET work_mem` | AllowSet=true | allowed |
 
 #### DO Block Protection
 
-| Test | SQL | Expected Error Contains |
-|---|---|---|
-| `TestBlockDo_Simple` | `DO $$ BEGIN RAISE NOTICE 'hello'; END $$` | `"DO $$ blocks are not allowed"` |
-| `TestBlockDo_WithDrop` | `DO $$ BEGIN EXECUTE 'DROP TABLE users'; END $$` | `"DO $$ blocks are not allowed"` |
-| `TestBlockDo_WithLanguage` | `DO LANGUAGE plpgsql $$ BEGIN NULL; END $$` | blocked |
-| `TestBlockDo_Disabled` | `DO $$ BEGIN NULL; END $$` (blockDo=false) | allowed |
+| Test | SQL | Config | Expected Error Contains |
+|---|---|---|---|
+| `TestDo_Simple` | `DO $$ BEGIN RAISE NOTICE 'hello'; END $$` | default | `"DO $$ blocks are not allowed: DO blocks can execute arbitrary SQL bypassing protection checks"` |
+| `TestDo_WithDrop` | `DO $$ BEGIN EXECUTE 'DROP TABLE users'; END $$` | default | `"DO $$ blocks are not allowed"` |
+| `TestDo_WithLanguage` | `DO LANGUAGE plpgsql $$ BEGIN NULL; END $$` | default | `"DO $$ blocks are not allowed"` |
+| `TestDo_Allowed` | `DO $$ BEGIN NULL; END $$` | AllowDo=true | allowed |
 
 #### DELETE/UPDATE with WHERE
 
-| Test | SQL | Expected Error Contains |
-|---|---|---|
-| `TestBlockDeleteWithoutWhere` | `DELETE FROM users` | `"DELETE without WHERE clause is not allowed"` |
-| `TestAllowDeleteWithWhere` | `DELETE FROM users WHERE id = 1` | allowed |
-| `TestAllowDeleteWithComplexWhere` | `DELETE FROM users WHERE id IN (SELECT id FROM banned)` | allowed |
-| `TestAllowDeleteWithExists` | `DELETE FROM users WHERE EXISTS (SELECT 1 FROM banned WHERE banned.uid = users.id)` | allowed |
-| `TestBlockUpdateWithoutWhere` | `UPDATE users SET active = false` | `"UPDATE without WHERE clause is not allowed"` |
-| `TestAllowUpdateWithWhere` | `UPDATE users SET active = false WHERE id = 1` | allowed |
-| `TestAllowUpdateWithSubqueryWhere` | `UPDATE users SET active = false WHERE id IN (SELECT id FROM active_users)` | allowed |
+| Test | SQL | Config | Expected Error Contains |
+|---|---|---|---|
+| `TestDeleteWithoutWhere` | `DELETE FROM users` | default | `"DELETE without WHERE clause is not allowed"` |
+| `TestDeleteWithWhere` | `DELETE FROM users WHERE id = 1` | default | allowed |
+| `TestDeleteWithComplexWhere` | `DELETE FROM users WHERE id IN (SELECT id FROM banned)` | default | allowed |
+| `TestDeleteWithExists` | `DELETE FROM users WHERE EXISTS (SELECT 1 FROM banned WHERE banned.uid = users.id)` | default | allowed |
+| `TestDeleteWithoutWhere_Allowed` | `DELETE FROM users` | AllowDeleteWithoutWhere=true | allowed |
+| `TestUpdateWithoutWhere` | `UPDATE users SET active = false` | default | `"UPDATE without WHERE clause is not allowed"` |
+| `TestUpdateWithWhere` | `UPDATE users SET active = false WHERE id = 1` | default | allowed |
+| `TestUpdateWithSubqueryWhere` | `UPDATE users SET active = false WHERE id IN (SELECT id FROM active_users)` | default | allowed |
+| `TestUpdateWithoutWhere_Allowed` | `UPDATE users SET active = false` | AllowUpdateWithoutWhere=true | allowed |
 
 #### Read-Only Mode
 
 | Test | SQL | Config | Expected Error Contains |
 |---|---|---|---|
-| `TestReadOnly_BlocksSetTransactionReadOnly` | `SET default_transaction_read_only = off` | readOnly=true, blockSet=false | `"SET default_transaction_read_only is blocked in read-only mode"` |
-| `TestReadOnly_BlocksSetTransactionReadOnly2` | `SET transaction_read_only = false` | readOnly=true, blockSet=false | `"SET transaction_read_only is blocked in read-only mode"` |
-| `TestReadOnly_BlocksResetAll` | `RESET ALL` | readOnly=true, blockSet=false | `"RESET ALL is blocked in read-only mode"` |
-| `TestReadOnly_BlocksResetTransactionReadOnly` | `RESET default_transaction_read_only` | readOnly=true, blockSet=false | `"RESET default_transaction_read_only is blocked in read-only mode"` |
-| `TestReadOnly_AllowsResetOther` | `RESET work_mem` | readOnly=true, blockSet=false | allowed |
-| `TestReadOnly_BlocksBeginReadWrite` | `BEGIN READ WRITE` | readOnly=true | `"BEGIN READ WRITE is blocked in read-only mode"` |
-| `TestReadOnly_BlocksStartTransactionReadWrite` | `START TRANSACTION READ WRITE` | readOnly=true | `"BEGIN READ WRITE is blocked in read-only mode"` |
-| `TestReadOnly_AllowsBeginReadOnly` | `BEGIN READ ONLY` | readOnly=true | allowed |
-| `TestReadOnly_AllowsBeginDefault` | `BEGIN` | readOnly=true | allowed |
-| `TestReadOnly_AllowsOtherSet` | `SET search_path = 'public'` | readOnly=true, blockSet=false | allowed |
+| `TestReadOnly_BlocksSetTransactionReadOnly` | `SET default_transaction_read_only = off` | ReadOnly=true, AllowSet=true | `"SET default_transaction_read_only is blocked in read-only mode: cannot change transaction read-only setting"` |
+| `TestReadOnly_BlocksSetTransactionReadOnly2` | `SET transaction_read_only = false` | ReadOnly=true, AllowSet=true | `"SET transaction_read_only is blocked in read-only mode: cannot change transaction read-only setting"` |
+| `TestReadOnly_BlocksResetAll` | `RESET ALL` | ReadOnly=true, AllowSet=true | `"RESET ALL is blocked in read-only mode: could disable read-only transaction setting"` |
+| `TestReadOnly_BlocksResetTransactionReadOnly` | `RESET default_transaction_read_only` | ReadOnly=true, AllowSet=true | `"RESET default_transaction_read_only is blocked in read-only mode"` |
+| `TestReadOnly_AllowsResetOther` | `RESET work_mem` | ReadOnly=true, AllowSet=true | allowed |
+| `TestReadOnly_BlocksBeginReadWrite` | `BEGIN READ WRITE` | ReadOnly=true | `"BEGIN READ WRITE is blocked in read-only mode: cannot start a read-write transaction"` |
+| `TestReadOnly_BlocksStartTransactionReadWrite` | `START TRANSACTION READ WRITE` | ReadOnly=true | `"BEGIN READ WRITE is blocked in read-only mode: cannot start a read-write transaction"` |
+| `TestReadOnly_AllowsBeginReadOnly` | `BEGIN READ ONLY` | ReadOnly=true | allowed |
+| `TestReadOnly_AllowsBeginDefault` | `BEGIN` | ReadOnly=true | allowed |
+| `TestReadOnly_AllowsOtherSet` | `SET search_path = 'public'` | ReadOnly=true, AllowSet=true | allowed |
+| `TestReadOnly_SetBlockedTakesPriority` | `SET default_transaction_read_only = off` | ReadOnly=true, AllowSet=false | `"SET default_transaction_read_only is blocked in read-only mode"` (readOnly check runs first) |
 
 #### Allowed Statements
 
-| Test | SQL | Expected |
-|---|---|---|
-| `TestAllowSelect` | `SELECT * FROM users` | allowed |
-| `TestAllowSelectComplex` | `WITH cte AS (SELECT * FROM users) SELECT * FROM cte WHERE id > 1` | allowed |
-| `TestAllowInsert` | `INSERT INTO users (name) VALUES ('test')` | allowed |
-| `TestAllowInsertReturning` | `INSERT INTO users (name) VALUES ('test') RETURNING *` | allowed |
-| `TestAllowInsertOnConflict` | `INSERT INTO users (id, name) VALUES (1, 'test') ON CONFLICT (id) DO UPDATE SET name = 'test'` | allowed |
-| `TestAllowCreateTable` | `CREATE TABLE test (id int)` | allowed (not blocked by protection) |
-| `TestAllowAlterTable` | `ALTER TABLE users ADD COLUMN email text` | allowed |
-| `TestAllowExplain` | `EXPLAIN ANALYZE SELECT * FROM users` | allowed |
-| `TestAllowGrant` | `GRANT SELECT ON users TO readonly_user` | allowed |
+| Test | SQL | Config | Expected |
+|---|---|---|---|
+| `TestAllowSelect` | `SELECT * FROM users` | default | allowed |
+| `TestAllowSelectComplex` | `WITH cte AS (SELECT * FROM users) SELECT * FROM cte WHERE id > 1` | default | allowed |
+| `TestAllowInsert` | `INSERT INTO users (name) VALUES ('test')` | default | allowed |
+| `TestAllowInsertReturning` | `INSERT INTO users (name) VALUES ('test') RETURNING *` | default | allowed |
+| `TestAllowInsertOnConflict` | `INSERT INTO users (id, name) VALUES (1, 'test') ON CONFLICT (id) DO UPDATE SET name = 'test'` | default | allowed |
+| `TestAllowCreateTable` | `CREATE TABLE test (id int)` | default | allowed (not blocked by protection) |
+| `TestAllowAlterTable` | `ALTER TABLE users ADD COLUMN email text` | default | allowed |
+| `TestAllowExplain` | `EXPLAIN ANALYZE SELECT * FROM users` | default | allowed |
+| `TestAllowGrant` | `GRANT SELECT ON users TO readonly_user` | default | allowed |
 
 #### Complex SQL / Edge Cases
 
-| Test | SQL | Expected |
-|---|---|---|
-| `TestCTEWithDelete` | `WITH deleted AS (DELETE FROM users WHERE id = 1 RETURNING *) SELECT * FROM deleted` | allowed (has WHERE) |
-| `TestCTEWithDeleteNoWhere` | `WITH deleted AS (DELETE FROM users RETURNING *) SELECT * FROM deleted` | blocked `"DELETE without WHERE"` |
-| `TestNestedSubquerySelect` | `SELECT * FROM (SELECT * FROM (SELECT id FROM users) AS a) AS b` | allowed |
-| `TestComplexJoins` | `SELECT u.*, o.* FROM users u JOIN orders o ON u.id = o.user_id LEFT JOIN items i ON o.id = i.order_id WHERE u.active = true` | allowed |
-| `TestWindowFunction` | `SELECT id, name, ROW_NUMBER() OVER (PARTITION BY department ORDER BY salary DESC) FROM employees` | allowed |
-| `TestRecursiveCTE` | `WITH RECURSIVE tree AS (SELECT id, parent_id FROM categories WHERE parent_id IS NULL UNION ALL SELECT c.id, c.parent_id FROM categories c JOIN tree t ON c.parent_id = t.id) SELECT * FROM tree` | allowed |
-| `TestJSONBQuery` | `SELECT data->>'name' AS name, data->'address'->>'city' AS city FROM users WHERE data @> '{"active": true}'` | allowed |
-| `TestArrayQuery` | `SELECT * FROM users WHERE tags @> ARRAY['admin']::text[]` | allowed |
-| `TestLateralJoin` | `SELECT * FROM users u, LATERAL (SELECT * FROM orders o WHERE o.user_id = u.id ORDER BY created_at DESC LIMIT 5) recent_orders` | allowed |
-| `TestParseError` | `NOT VALID SQL @#$` | error contains `"SQL parse error"` |
-| `TestAllProtectionsDisabled_SingleStatement` | `DROP TABLE users` (all protections off) | allowed |
-| `TestSQLInjection_UnionBased` | `SELECT * FROM users WHERE id = 1 UNION SELECT * FROM pg_shadow` | allowed (single statement, no protection rule against UNION) |
-| `TestSQLInjection_CommentBased` | `SELECT * FROM users -- WHERE admin = true` | allowed (single statement, comment is valid SQL) |
-| `TestSQLInjection_MultiStatement` | `SELECT * FROM users; DROP TABLE users` | blocked `"multi-statement"` |
-| `TestSQLInjection_Stacked` | `SELECT 1; DELETE FROM users; --` | blocked `"multi-statement"` |
-| `TestEmptySQL` | `` (empty string) | parse error |
-| `TestWhitespaceOnlySQL` | `   ` | parse error |
+| Test | SQL | Config | Expected |
+|---|---|---|---|
+| `TestCTEWithDelete` | `WITH deleted AS (DELETE FROM users WHERE id = 1 RETURNING *) SELECT * FROM deleted` | default | allowed (has WHERE) |
+| `TestCTEWithDeleteNoWhere` | `WITH deleted AS (DELETE FROM users RETURNING *) SELECT * FROM deleted` | default | `"DELETE without WHERE clause is not allowed"` |
+| `TestNestedSubquerySelect` | `SELECT * FROM (SELECT * FROM (SELECT id FROM users) AS a) AS b` | default | allowed |
+| `TestComplexJoins` | `SELECT u.*, o.* FROM users u JOIN orders o ON u.id = o.user_id LEFT JOIN items i ON o.id = i.order_id WHERE u.active = true` | default | allowed |
+| `TestWindowFunction` | `SELECT id, name, ROW_NUMBER() OVER (PARTITION BY department ORDER BY salary DESC) FROM employees` | default | allowed |
+| `TestRecursiveCTE` | `WITH RECURSIVE tree AS (SELECT id, parent_id FROM categories WHERE parent_id IS NULL UNION ALL SELECT c.id, c.parent_id FROM categories c JOIN tree t ON c.parent_id = t.id) SELECT * FROM tree` | default | allowed |
+| `TestJSONBQuery` | `SELECT data->>'name' AS name, data->'address'->>'city' AS city FROM users WHERE data @> '{"active": true}'` | default | allowed |
+| `TestArrayQuery` | `SELECT * FROM users WHERE tags @> ARRAY['admin']::text[]` | default | allowed |
+| `TestLateralJoin` | `SELECT * FROM users u, LATERAL (SELECT * FROM orders o WHERE o.user_id = u.id ORDER BY created_at DESC LIMIT 5) recent_orders` | default | allowed |
+| `TestParseError` | `NOT VALID SQL @#$` | default | `"SQL parse error"` |
+| `TestAllProtectionsAllowed` | `DROP TABLE users` | all Allow* = true | allowed |
+| `TestSQLInjection_UnionBased` | `SELECT * FROM users WHERE id = 1 UNION SELECT * FROM pg_shadow` | default | allowed (single statement, no protection rule against UNION) |
+| `TestSQLInjection_CommentBased` | `SELECT * FROM users -- WHERE admin = true` | default | allowed (single statement, comment is valid SQL) |
+| `TestSQLInjection_MultiStatement` | `SELECT * FROM users; DROP TABLE users` | default | `"multi-statement queries are not allowed: found 2 statements"` |
+| `TestSQLInjection_Stacked` | `SELECT 1; DELETE FROM users; --` | default | `"multi-statement queries are not allowed: found 3 statements"` |
+| `TestEmptySQL` | `` (empty string) | default | `"SQL parse error"` |
+| `TestWhitespaceOnlySQL` | `   ` | default | `"SQL parse error"` |
 
 ### 6.2 Unit Tests: Sanitization (`internal/sanitize/sanitize_test.go`)
 
@@ -1334,6 +1479,7 @@ All tests are pure unit tests — no database needed. Each test asserts both the
 | `TestSanitizeArrayField` | `[]interface{}{"+62821233447", "+62899887766"}` | phone regex | both elements sanitized |
 | `TestSanitizeNullField` | `nil` | any rule | `nil` (unchanged) |
 | `TestSanitizeNumericField` | `int64(12345)` | any rule | `12345` (unchanged, not a string) |
+| `TestSanitizeJsonNumber` | `json.Number("9007199254740993")` | any rule | unchanged (not a string type for sanitization) |
 | `TestSanitizeBooleanField` | `true` | any rule | `true` (unchanged) |
 | `TestSanitizeEmptyRules` | any value | no rules | unchanged |
 | `TestSanitizeRows` | full result set with mixed types | phone regex | only string fields sanitized |
@@ -1344,26 +1490,28 @@ Tests use the shell scripts in `testdata/hooks/`. All scripts must be `chmod +x`
 
 | Test | Hook Config | Expected |
 |---|---|---|
-| `TestBeforeQuery_Accept` | accept.sh, pattern `.*` | query passes through unchanged |
-| `TestBeforeQuery_Reject` | reject.sh, pattern `.*` | error returned with "rejected by test hook" |
-| `TestBeforeQuery_ModifyQuery` | modify_query.sh, pattern `.*` | query changed to "SELECT 1 AS modified" |
-| `TestBeforeQuery_PatternNoMatch` | accept.sh, pattern `NEVER_MATCH` | hook not executed, query passes through |
-| `TestBeforeQuery_Chaining` | [modify_query.sh, accept.sh] | second hook receives modified query |
-| `TestBeforeQuery_ChainPatternReEval` | [modify_query.sh (pattern `.*`), reject.sh (pattern `modified`)] | second hook matches modified query, rejects |
-| `TestBeforeQuery_Timeout` | slow.sh, timeout=1s | hook times out, logged, query continues |
-| `TestBeforeQuery_Crash` | crash.sh, pattern `.*` | hook fails, logged, query continues |
-| `TestAfterQuery_Accept` | accept.sh | result passes through |
-| `TestAfterQuery_Reject` | reject.sh | error returned |
-| `TestAfterQuery_ModifyResult` | modify_result.sh | result changed |
-| `TestAfterQuery_Chaining` | [modify_result.sh, accept.sh] | second hook receives modified result |
-| `TestAfterQuery_Timeout` | slow.sh, timeout=1s | times out, logged, continues |
-| `TestAfterQuery_Crash` | crash.sh | fails, logged, continues |
-| `TestHookStdinInput` | custom script that echoes stdin back | verify correct input passed |
-| `TestHookWithArgs` | script that prints args to stdout, args: `["--flag", "value"]` | verify args passed correctly to exec.Command |
-| `TestHookWithEmptyArgs` | accept.sh, args: `[]` | works same as no args |
-| `TestHookDefaultTimeout` | slow.sh with no per-hook timeout, default=1s | uses default timeout, hook times out |
-| `TestHookPerHookTimeoutOverridesDefault` | slow.sh with per-hook timeout=2s, default=1s | uses per-hook timeout |
+| `TestBeforeQuery_Accept` | accept.sh, pattern `.*` | query passes through unchanged, no error |
+| `TestBeforeQuery_Reject` | reject.sh, pattern `.*` | error returned: `"rejected by test hook"` |
+| `TestBeforeQuery_ModifyQuery` | modify_query.sh, pattern `.*` | query changed to `"SELECT 1 AS modified"` |
+| `TestBeforeQuery_PatternNoMatch` | accept.sh, pattern `NEVER_MATCH` | hook not executed, query passes through unchanged |
+| `TestBeforeQuery_Chaining` | [modify_query.sh, accept.sh] | second hook receives `"SELECT 1 AS modified"` as input |
+| `TestBeforeQuery_ChainPatternReEval` | [modify_query.sh (pattern `.*`), reject.sh (pattern `modified`)] | second hook matches modified query, error: `"rejected by test hook"` |
+| `TestBeforeQuery_Timeout` | slow.sh, timeout=1s | hook times out, logged, query continues unchanged |
+| `TestBeforeQuery_Crash` | crash.sh, pattern `.*` | hook fails, logged, query continues unchanged |
+| `TestAfterQuery_Accept` | accept.sh | result passes through unchanged |
+| `TestAfterQuery_Reject` | reject.sh | error returned: `"rejected by test hook"` |
+| `TestAfterQuery_ModifyResult` | modify_result.sh | result changed to modified JSON |
+| `TestAfterQuery_Chaining` | [modify_result.sh, accept.sh] | second hook receives modified result as input |
+| `TestAfterQuery_Timeout` | slow.sh, timeout=1s | times out, logged, result continues unchanged |
+| `TestAfterQuery_Crash` | crash.sh | fails, logged, result continues unchanged |
+| `TestHookStdinInput` | custom script that echoes stdin back | verify raw SQL query string passed as stdin for BeforeQuery |
+| `TestHookWithArgs` | echo_args.sh, args: `["--flag", "value"]` | modified_query contains `"ARGS: --flag value"` |
+| `TestHookWithEmptyArgs` | accept.sh, args: `[]` | works same as no args, query passes through |
+| `TestHookDefaultTimeout` | slow.sh with no per-hook timeout, default=1s | uses default timeout, hook times out, query continues |
+| `TestHookPerHookTimeoutOverridesDefault` | slow.sh with per-hook timeout=2s, default=1s | uses per-hook timeout (2s), hook still times out (sleep 30) |
 | `TestHookPanicOnZeroDefaultTimeout` | config with hooks but default_timeout=0 | NewRunner panics |
+| `TestHasAfterQueryHooks_True` | config with AfterQuery hooks | `HasAfterQueryHooks()` returns `true` |
+| `TestHasAfterQueryHooks_False` | config with no AfterQuery hooks | `HasAfterQueryHooks()` returns `false` |
 
 ### 6.4 Unit Tests: Error Prompts (`internal/errprompt/errprompt_test.go`)
 
@@ -1389,17 +1537,20 @@ Tests use the shell scripts in `testdata/hooks/`. All scripts must be `chmod +x`
 
 | Test | Scenario | Expected |
 |---|---|---|
-| `TestLoadConfigValid` | valid JSON config file | parsed correctly |
-| `TestLoadConfigFromEnvPath` | `GOPGMCP_CONFIG_PATH` set | reads from env path |
-| `TestLoadConfigMissing` | no config file | returns error |
-| `TestLoadConfigInvalidJSON` | malformed JSON | returns parse error |
-| `TestLoadConfigInvalidRegex` | invalid regex in protection/sanitization/hooks | returns descriptive error |
-| `TestLoadConfigDefaults` | minimal config (only required fields) | defaults applied |
-| `TestLoadConfigValidation_NoPort` | config without server.port | returns error |
-| `TestLoadConfigValidation_NegativeTimeout` | negative timeout value | returns error |
-| `TestLoadConfigValidation_ZeroHookDefaultTimeout` | hooks configured but `default_timeout_seconds` = 0 | panics on start |
+| `TestLoadConfigValid` | valid JSON config file | parsed correctly, all fields populated |
+| `TestLoadConfigFromEnvPath` | `GOPGMCP_CONFIG_PATH` set | reads from env path, not default location |
+| `TestLoadConfigMissing` | no config file | returns error containing config path |
+| `TestLoadConfigInvalidJSON` | malformed JSON | returns error containing `"invalid"` or `"unmarshal"` |
+| `TestLoadConfigInvalidRegex` | invalid regex in sanitization rules | returns error containing `"regex"` or `"compile"` and the invalid pattern |
+| `TestLoadConfigDefaults` | minimal config (only server.port and pool.max_conns) | `query.default_timeout_seconds` = 30, `query.max_result_length` = 100000, `hooks.default_timeout_seconds` = 10 |
+| `TestLoadConfigValidation_NoPort` | config without server.port | panics with message containing `"server.port"` |
+| `TestLoadConfigValidation_ZeroMaxConns` | config with pool.max_conns = 0 | panics with message containing `"pool.max_conns"` |
+| `TestLoadConfigValidation_NegativeTimeout` | negative timeout value | returns error containing `"timeout"` |
+| `TestLoadConfigValidation_ZeroHookDefaultTimeout` | hooks configured but `default_timeout_seconds` = 0 | panics with message containing `"default_timeout_seconds"` |
 | `TestLoadConfigValidation_HookTimeoutFallback` | hook with `timeout_seconds` = 0, default = 10 | hook uses default (10s) |
-| `TestLoadConfigValidation_BlockDoDefault` | minimal config, no `block_do` field | defaults to `true` |
+| `TestLoadConfigProtectionDefaults` | minimal config, no protection fields | all `Allow*` fields are `false` (Go zero-value = blocked) |
+| `TestLoadConfigProtectionExplicitAllow` | config with `allow_drop: true` | `AllowDrop` is `true`, all others remain `false` |
+| `TestLoadConfigSSLMode` | config with `sslmode: "verify-full"` | `Connection.SSLMode` is `"verify-full"` |
 
 ---
 
@@ -1413,30 +1564,35 @@ Run with: `go test -tags=integration -race -v ./...`
 
 | Test | Setup | Action | Assert |
 |---|---|---|---|
-| `TestQuery_SelectBasic` | Create table with sample data | `SELECT * FROM users` | Returns correct JSON rows |
-| `TestQuery_SelectJSONB` | Table with JSONB column | `SELECT data FROM items` | JSONB returned as proper JSON object, not string |
-| `TestQuery_JSONBReturnType` | Table with JSONB column containing nested objects, arrays, nulls, numbers, booleans | `SELECT data FROM items` | Validates that JSONB is returned as parsed Go map/slice (not string), even with `QueryExecModeExec`. Tests the JSONB handling concern with real pgflock database. |
+| `TestQuery_SelectBasic` | Create table with sample data | `SELECT * FROM users` | Returns correct JSON rows with matching column names and values |
+| `TestQuery_SelectJSONB` | Table with JSONB column | `SELECT data FROM items` | JSONB returned as proper JSON object (map), not string |
+| `TestQuery_JSONBReturnType` | Table with JSONB column containing nested objects, arrays, nulls, numbers, booleans | `SELECT data FROM items` | Validates that JSONB is returned as parsed Go map/slice (not string), even with `QueryExecModeExec`. Numbers inside JSONB preserved via `UseNumber()`. Tests the JSONB handling concern with real pgflock database. |
+| `TestQuery_JSONBNumericPrecision` | Table with JSONB containing large integers e.g. `{"id": 9007199254740993}` (2^53+1) | `SELECT data FROM items` | Large integer preserved exactly as `json.Number("9007199254740993")`, not truncated to float64 |
 | `TestQuery_SelectArray` | Table with integer[] column | `SELECT tags FROM posts` | Array returned as JSON array |
 | `TestQuery_SelectCTE` | Table with data | `WITH cte AS (SELECT ...) SELECT * FROM cte` | Correct results |
 | `TestQuery_SelectNestedSubquery` | Multiple tables | Query with subqueries | Correct results |
-| `TestQuery_Insert` | Empty table | `INSERT INTO users ... RETURNING *` | Returns inserted row |
-| `TestQuery_Update` | Table with data | `UPDATE users SET ... WHERE ... RETURNING *` | Returns updated row |
+| `TestQuery_Insert` | Empty table | `INSERT INTO users ... RETURNING *` | Returns inserted row with correct values |
+| `TestQuery_Update` | Table with data | `UPDATE users SET ... WHERE ... RETURNING *` | Returns updated row with new values |
 | `TestQuery_Delete` | Table with data | `DELETE FROM users WHERE ... RETURNING *` | Returns deleted row |
 | `TestQuery_Transaction` | Table | `SELECT * FROM users` | Verify runs in transaction (data consistency) |
-| `TestQuery_Timeout` | Table | `SELECT pg_sleep(10)` with 1s timeout | Timeout error returned |
+| `TestQuery_Timeout` | Table | `SELECT pg_sleep(10)` with 1s timeout | Error contains `"context deadline exceeded"` or `"canceling statement"` |
 | `TestQuery_TimeoutRuleMatch` | Config with timeout rule matching query | Slow query | Uses rule timeout, not default |
-| `TestQuery_ProtectionEndToEnd` | Table | `DROP TABLE users` | Error: blocked by protection |
+| `TestQuery_ProtectionEndToEnd` | Table | `DROP TABLE users` | Error: `"DROP statements are not allowed"` |
 | `TestQuery_HooksEndToEnd` | Config with real hook scripts | Query matching hook pattern | Hook executed, result correct |
-| `TestQuery_SanitizationEndToEnd` | Table with phone numbers | `SELECT phone FROM contacts` | Phone numbers sanitized |
-| `TestQuery_ErrorPromptEndToEnd` | No table | `SELECT * FROM nonexistent` | Error includes prompt message |
-| `TestQuery_MaxResultLength` | Table with many rows | `SELECT * FROM large_table` | Result truncated with message |
-| `TestQuery_ReadOnlyMode` | Config with read_only=true | `INSERT INTO users ...` | Error: read-only transaction |
-| `TestQuery_ReadOnlyModeBlocksSetBypass` | Config with read_only=true | `SET default_transaction_read_only = off` | Error: blocked |
-| `TestQuery_NullValues` | Table with NULL columns | `SELECT * FROM ...` | NULL returned as JSON null |
-| `TestQuery_UUIDColumn` | Table with UUID column | `SELECT id FROM ...` | UUID as string |
-| `TestQuery_TimestampColumn` | Table with timestamp column | `SELECT created_at FROM ...` | Timestamp as ISO 8601 |
-| `TestQuery_NumericColumn` | Table with numeric(10,2) | `SELECT price FROM ...` | Proper numeric value |
+| `TestQuery_SanitizationEndToEnd` | Table with phone numbers | `SELECT phone FROM contacts` | Phone numbers sanitized per regex rules |
+| `TestQuery_ErrorPromptEndToEnd` | No table | `SELECT * FROM nonexistent` | Error contains both Postgres error and appended prompt message |
+| `TestQuery_MaxResultLength` | Table with many rows | `SELECT * FROM large_table` | Result truncated, error contains `"[truncated] Result is too long!"` |
+| `TestQuery_ReadOnlyMode` | Config with read_only=true | `INSERT INTO users ...` | Error contains `"read-only transaction"` or `"cannot execute"` |
+| `TestQuery_ReadOnlyModeBlocksSetBypass` | Config with read_only=true | `SET default_transaction_read_only = off` | Error: `"SET default_transaction_read_only is blocked in read-only mode"` |
+| `TestQuery_NullValues` | Table with NULL columns | `SELECT * FROM ...` | NULL returned as JSON null (Go `nil`) |
+| `TestQuery_UUIDColumn` | Table with UUID column | `SELECT id FROM ...` | UUID as formatted string `"xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"` |
+| `TestQuery_TimestampColumn` | Table with timestamp column | `SELECT created_at FROM ...` | Timestamp as RFC3339Nano string |
+| `TestQuery_NumericColumn` | Table with numeric(10,2) | `SELECT price FROM ...` | Proper numeric value (float64) |
+| `TestQuery_BigIntColumn` | Table with bigint column, value `9007199254740993` (2^53+1) | `SELECT big_id FROM ...` | Value preserved as exact integer (not float64-truncated) |
+| `TestQuery_ByteaColumn` | Table with bytea column containing binary data | `SELECT avatar FROM ...` | Binary data returned as base64-encoded string |
 | `TestQuery_EmptyResult` | Empty table | `SELECT * FROM empty_table` | Empty rows array, columns present |
+| `TestQuery_NumericPrecisionWithHooks` | Config with AfterQuery accept.sh hook, table with bigint 2^53+1 | `SELECT big_id FROM ...` | Value survives JSON round-trip through hooks via `UseNumber()`, exact integer preserved |
+| `TestQuery_NumericPrecisionWithoutHooks` | Config with no hooks, table with bigint 2^53+1 | `SELECT big_id FROM ...` | Value preserved (no JSON round-trip occurs) |
 
 #### ListTables Integration Tests
 
@@ -1460,7 +1616,7 @@ Run with: `go test -tags=integration -race -v ./...`
 | `TestDescribeTable_CheckConstraint` | Table with CHECK | Constraint listed |
 | `TestDescribeTable_DefaultValues` | Table with defaults | Default values shown |
 | `TestDescribeTable_SchemaQualified` | Table in custom schema | schema parameter works |
-| `TestDescribeTable_NotFound` | No such table | Descriptive error |
+| `TestDescribeTable_NotFound` | No such table | Error contains `"does not exist"` or `"not found"` |
 | `TestDescribeTable_View` | View over users table | Type="view", columns listed, Definition contains view SQL, no indexes/constraints/FKs |
 | `TestDescribeTable_MaterializedView` | Materialized view over users | Type="materialized_view", columns from pg_attribute (not information_schema), Definition contains SQL, indexes listed (matviews can have indexes) |
 | `TestDescribeTable_MaterializedViewWithIndex` | Matview + CREATE INDEX | Index listed in indexes array |
@@ -1492,7 +1648,7 @@ Build tag: `//go:build integration`
 |---|---|
 | `TestStress_ConcurrentQueries` | Spawn 50 goroutines each running 20 queries. Assert all complete without error. Verify total time is reasonable (bounded by pool size, not sequential). |
 | `TestStress_SemaphoreLimit` | Config max_conns=3. Spawn 20 goroutines with `SELECT pg_sleep(0.1)`. Assert max 3 concurrent queries (instrument with atomic counter). |
-| `TestStress_LargeResultTruncation` | Insert 10,000 rows. `SELECT *` with max_result_length=1000. Assert truncation message present. |
+| `TestStress_LargeResultTruncation` | Insert 10,000 rows. `SELECT *` with max_result_length=1000. Assert error contains `"[truncated] Result is too long! Add limits in your query!"`. |
 | `TestStress_ConcurrentHooks` | Config with hooks. Spawn 20 goroutines querying. Assert hooks run correctly under concurrency (no data races, no cross-contamination). |
 | `TestStress_MixedOperations` | Concurrent mix of Query, ListTables, DescribeTable. Assert all complete correctly. |
 
@@ -1507,7 +1663,7 @@ All tests above run with `-race` flag. Additionally:
 | `TestRace_ConcurrentErrorPrompt` | 10 goroutines matching different errors with same Matcher. Assert no races. |
 | `TestRace_ConcurrentTimeout` | 10 goroutines resolving timeouts with same Manager. Assert no races. |
 
-These tests verify that all shared components are safe for concurrent use. They are structured as:
+These tests verify that all shared components are safe for concurrent use. Each goroutine must use its own copy of mutable data (maps/slices) since `SanitizeRows` mutates values in-place:
 ```go
 func TestRace_ConcurrentSanitization(t *testing.T) {
     s, _ := sanitize.NewSanitizer(rules)
@@ -1517,7 +1673,9 @@ func TestRace_ConcurrentSanitization(t *testing.T) {
         go func() {
             defer wg.Done()
             for j := 0; j < 100; j++ {
-                s.SanitizeRows(testData)
+                // Each iteration gets a fresh copy — SanitizeRows mutates in-place
+                data := copyTestData(testData)
+                s.SanitizeRows(data)
             }
         }()
     }
@@ -1617,10 +1775,10 @@ Must include:
 2. **Quick start** — installation, config file creation, running the server.
 
 3. **Configuration reference** — all config fields with types, defaults, and descriptions:
-   - Connection (host, port, dbname) — used when `GOPGMCP_PG_CONNSTRING` env var is not set
+   - Connection (host, port, dbname, sslmode) — used when `GOPGMCP_PG_CONNSTRING` env var is not set
    - Pool settings (mirrors pgxpool config)
    - Server settings (port, read_only, health check)
-   - Protection rules (SET, DROP, TRUNCATE, DO blocks, DELETE/UPDATE WHERE requirements) — all default on
+   - Protection rules (SET, DROP, TRUNCATE, DO blocks, DELETE/UPDATE WHERE) — all blocked by default (`false` = blocked, `true` = allowed)
    - Query settings (default timeout, max result length, timeout rules)
    - Error prompts (regex → message, evaluated against ALL errors including hook/Go errors)
    - Sanitization rules (regex → replacement, applied per-field recursively into JSONB/arrays)

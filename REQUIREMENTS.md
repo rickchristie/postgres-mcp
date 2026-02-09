@@ -88,25 +88,25 @@ Create Postgres MCP with Golang.
   - Default hook timeout in seconds.
 - MCP reads connection string through environment variable `GOPGMCP_PG_CONNSTRING`.
   - It's postgresql connection string  - so whether it's sslmode, etc. - can be specified here. It has highest priority.
-  - If connection string from environment is not found, server will try to read host, port, dbname from configuration file.
+  - If connection string from environment is not found, server will try to read host, port, dbname, and sslmode from configuration file.
     - Username and password is not read from config file.
     - Username and password is then asked to the user interactively on server start.
     - This provides flexibility for users to not store username/password in config file and environment variable, providing it interactively on server start - recommended when running it locally.
 - Other configuration:
   - HTTP port to listen on. No default port - must be specified in config file, server panics if not found.
   - Read-only mode. If true, only allow SELECT queries and other queries that do not modify data - starts connections in read-only mode.
-    - When Read-only mode is on. Even when SET protection is off, we detect and reject any attempt to change transaction mode to write.
+    - When Read-only mode is on. Even when SET is allowed (`allow_set: true`), we detect and reject any attempt to change transaction mode to write.
   - Connection pool config - max connections, min connections, idle timeout, etc - this should mirror pgxpool config options.
   - Logging config - log level, output format (json, text), output file (stdout, file path).
   - Health check endpoint - for load balancers/k8s probes. Health check confirms the MCP server process is running and responsive — it does NOT check database connectivity.
-  - Protection (each rule can be individually toggled on/off, all default on):
-    - SET - disallowed.
-    - DROP - disallowed.
-    - TRUNCATE - disallowed.
-    - DO $$ blocks - disallowed. DO blocks can execute arbitrary SQL inside PL/pgSQL, bypassing all other protection checks.
-    - DELETE - disallowed unless with WHERE clause.
-    - UPDATE - disallowed unless with WHERE clause.
-    - Multi-statement queries (e.g. `SELECT 1; DROP TABLE users`) - always disallowed, cannot be toggled off.
+  - Protection (each rule can be individually toggled — Go zero-value `false` = blocked, which is the safe default):
+    - SET - blocked by default (`allow_set: false`).
+    - DROP - blocked by default (`allow_drop: false`).
+    - TRUNCATE - blocked by default (`allow_truncate: false`).
+    - DO $$ blocks - blocked by default (`allow_do: false`). DO blocks can execute arbitrary SQL inside PL/pgSQL, bypassing all other protection checks.
+    - DELETE without WHERE - blocked by default (`allow_delete_without_where: false`).
+    - UPDATE without WHERE - blocked by default (`allow_update_without_where: false`).
+    - Multi-statement queries (e.g. `SELECT 1; DROP TABLE users`) - always blocked, cannot be toggled.
     - When Read-only mode is on, additionally block:
       - `RESET ALL` and `RESET default_transaction_read_only` (could disable read-only mode).
       - `BEGIN READ WRITE` / `START TRANSACTION READ WRITE` (explicit write transaction).
@@ -132,7 +132,8 @@ Create Postgres MCP with Golang.
     "connection": {
       "host": "localhost",
       "port": 5432,
-      "dbname": "myapp"
+      "dbname": "myapp",
+      "sslmode": "prefer"
     },
     "pool": {
       "max_conns": 10,
@@ -153,12 +154,12 @@ Create Postgres MCP with Golang.
       "output": "stdout"
     },
     "protection": {
-      "block_set": true,
-      "block_drop": true,
-      "block_truncate": true,
-      "block_do": true,
-      "require_where_on_delete": true,
-      "require_where_on_update": true
+      "allow_set": false,
+      "allow_drop": false,
+      "allow_truncate": false,
+      "allow_do": false,
+      "allow_delete_without_where": false,
+      "allow_update_without_where": false
     },
     "query": {
       "default_timeout_seconds": 30,
