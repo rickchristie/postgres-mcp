@@ -111,6 +111,7 @@ Create Postgres MCP with Golang.
   - HTTP port to listen on. No default port - must be specified in config file, server panics if not found.
   - Read-only mode. If true, only allow SELECT queries and other queries that do not modify data - starts connections in read-only mode.
     - When Read-only mode is on. Even when SET is allowed (`allow_set: true`), we detect and reject any attempt to change transaction mode to write.
+  - Timezone setting. Sets the session timezone on every connection via `AfterConnect` (runs `SET timezone = '<value>'`). This allows controlling the timezone for query results without enabling `allow_set`. This is critical because AI agents frequently misinterpret timestamps when the timezone is ambiguous or unexpected. If not set (empty string), the server uses the PostgreSQL server's default timezone. The value must be a valid IANA timezone name (e.g., "America/New_York", "Asia/Jakarta") or PostgreSQL timezone abbreviation (e.g., "UTC"). Postgres validates the timezone value — if invalid, the connection will fail at pool initialization.
   - Connection pool config - max connections, min connections, idle timeout, etc - this should mirror pgxpool config options.
   - Logging config - log level, output format (json, text), output file (stdout, file path).
   - Health check endpoint - for load balancers/k8s probes. Health check confirms the MCP server process is running and responsive — it does NOT check database connectivity.
@@ -168,7 +169,8 @@ Create Postgres MCP with Golang.
       "port": 8080,
       "health_check_enabled": true,
       "health_check_path": "/health-check",
-      "read_only": false
+      "read_only": false,
+      "timezone": "UTC"
     },
     "logging": {
       "level": "info",

@@ -147,6 +147,7 @@ type ServerConfig struct {
     HealthCheckEnabled bool   `json:"health_check_enabled"`
     HealthCheckPath    string `json:"health_check_path"`
     ReadOnly           bool   `json:"read_only"`
+    Timezone           string `json:"timezone"`
 }
 
 type LoggingConfig struct {
@@ -906,7 +907,10 @@ Each query execution creates its own data (rows, maps) and the sanitizer operate
    - All regex patterns validated by internal constructors (they panic on invalid regex)
    - If both Go hooks (`BeforeQueryHooks`/`AfterQueryHooks`) and command hooks (`Hooks.BeforeQuery`/`Hooks.AfterQuery`) are configured, panic — they are mutually exclusive
 2. Configure `pgxpool.Config`: apply pool settings, set `DefaultQueryExecMode` to `pgx.QueryExecModeExec`.
-3. If `config.Server.ReadOnly`, set `AfterConnect` hook to run `SET default_transaction_read_only = on` on each connection.
+3. Set `AfterConnect` hook on pool config to run session-level SET commands on each new connection:
+   - If `config.Server.ReadOnly`: run `SET default_transaction_read_only = on`.
+   - If `config.Server.Timezone` is non-empty: run `SET timezone = '<value>'`. Uses `pgx.Identifier{config.Server.Timezone}.Sanitize()` — no, timezone values are not identifiers. Use parameterized query or string literal with validation. Actually, `SET timezone` does not support `$1` parameters. Use `fmt.Sprintf("SET timezone = '%s'", strings.ReplaceAll(config.Server.Timezone, "'", "''"))` to safely escape single quotes, or simply rely on Postgres to reject invalid values.
+   - Both can be combined in a single `AfterConnect` function.
 4. Create `pgxpool.Pool` (returns error on connection failure — this is a runtime error, not a config error).
 5. Create semaphore: `make(chan struct{}, config.Pool.MaxConns)` — bounds concurrent query pipelines.
 6. Initialize all internal components, mapping pgmcp config types to internal package config types:
@@ -2442,6 +2446,10 @@ Run with: `go test -tags=integration -race -v ./...`
 | `TestQuery_MaxResultLength` | Table with many rows | `SELECT * FROM large_table` | Result truncated, error contains `"[truncated] Result is too long!"` |
 | `TestQuery_ReadOnlyMode` | Config with read_only=true | `INSERT INTO users ...` | Error contains `"read-only transaction"` or `"cannot execute"` |
 | `TestQuery_ReadOnlyModeBlocksSetBypass` | Config with read_only=true | `SET default_transaction_read_only = off` | Error: `"SET default_transaction_read_only is blocked in read-only mode"` |
+| `TestQuery_Timezone` | Config with timezone="America/New_York" | `SELECT NOW()::timestamptz` | Returned timestamp contains "-05:00" or "-04:00" (EST/EDT) offset, not server default |
+| `TestQuery_TimezoneUTC` | Config with timezone="UTC" | `SELECT NOW()::timestamptz` | Returned timestamp contains "+00:00" offset |
+| `TestQuery_TimezoneEmpty` | Config with timezone="" (default) | `SELECT current_setting('timezone')` | Returns server's default timezone (not overridden) |
+| `TestQuery_TimezoneWithReadOnly` | Config with timezone="Asia/Jakarta", read_only=true | `SELECT current_setting('timezone')` | Returns "Asia/Jakarta" — both AfterConnect settings applied |
 | `TestQuery_NullValues` | Table with NULL columns | `SELECT * FROM ...` | NULL returned as JSON null (Go `nil`) |
 | `TestQuery_UUIDColumn` | Table with UUID column | `SELECT id FROM ...` | UUID as formatted string `"xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"` |
 | `TestQuery_TimestampColumn` | Table with timestamp column | `SELECT created_at FROM ...` | Timestamp as RFC3339Nano string |
@@ -2868,7 +2876,7 @@ Must include:
 3. **Configuration reference** — all config fields with types, defaults, and descriptions:
    - Connection (host, port, dbname, sslmode) — used when `GOPGMCP_PG_CONNSTRING` env var is not set
    - Pool settings (mirrors pgxpool config)
-   - Server settings (port, read_only, health check)
+   - Server settings (port, read_only, timezone, health check)
    - Protection rules (SET, DROP, TRUNCATE, DO blocks, DELETE/UPDATE WHERE) — all blocked by default (`false` = blocked, `true` = allowed)
    - Query settings (default timeout, max result length, timeout rules)
    - Error prompts (regex → message, evaluated against ALL errors including hook/Go errors)
