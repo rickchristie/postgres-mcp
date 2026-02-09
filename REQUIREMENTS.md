@@ -5,8 +5,11 @@ Create Postgres MCP with Golang.
 - Great code architecture, with comprehensive unit tests for both correctness, race condition, and stress testing.
 - Supports only HTTP transport type.
   - Does not support SSE.
-  - Does not support CORS, as it is not designed to be run as public server (no auth!) - 
-    only in trusted environment (local or internal server service, not exposed to public). We need to make this very clear in the documentation.
+  - Does not support CORS and explicitly does not set any CORS headers. CORS is only enforced by browsers —
+    intended clients (AI agents, CLI tools, internal services) connect via plain HTTP where CORS doesn't apply.
+    Adding CORS headers would only create an attack vector if the server is accidentally exposed (any malicious webpage could make requests to it).
+    This is not designed to be run as public server (no auth!) - only in trusted environment (local or internal server service, not exposed to public).
+    We need to make this very clear in the documentation.
   - Targets 2025-03-26 (Streamable HTTP) for compatibility.
 - Supports only Postgres database.
 - Supports multiple connections at once to a single database, production-grade, ready and scalable.
@@ -24,7 +27,7 @@ Create Postgres MCP with Golang.
   - JSONB, arrays etc are returned as proper JSON, JSON arrays, not as stringified values.
 - Have these tools:
   - Query:
-    - Returns error messages directly whenever there are query errors.
+    - Returns only an output struct (no Go error). All errors (Postgres errors, protection rejections, hook rejections, Go errors) are converted into the output's error message field. This error message is then evaluated against error_prompts regex patterns for appending additional guidance.
     - Returns RAW results, formatted as JSON.
     - The query is run in a transaction.
   - ListTables:
@@ -66,14 +69,15 @@ Create Postgres MCP with Golang.
       - Hooks are run in middleware fashion. The modified query from one hook is passed to the next hook as input.
       - If any hook rejects, the whole Query is rejected.
       - Hooks are matched against the query first, then executed. If the query is modified, the next hook will be matched against the modified query.
-    - AfterQuery - can reject, modify RAW results, based on content. Regex matches against RAW results JSON string.
-      - Input: RAW results JSON, passed as stdin to the bash command.
+    - AfterQuery - can reject, modify RAW results, based on content. Regex matches against complete RAW results JSON string (includes columns and error fields).
+      - Input: complete RAW results JSON, passed as stdin to the bash command.
       - Must return JSON with "accept": true/false, and optional "modified_result": "new RAW JSON result string" and "error_message": "custom error message when rejected".
       - Hooks are run first before sanitization.
       - Hooks are run in middleware fashion. The modified result from one hook is passed to the next hook as input.
       - If any hook rejects, the whole Query is rejected.
       - Hooks are matched against the RAW result first, then executed. If the result is modified, the next hook will be matched against the modified result.
-    - Hook timeout in seconds. Applies per hook.
+    - Each hook entry specifies the command path and optional arguments array. The command is executed directly via Go's exec.Command (no shell), with arguments passed separately.
+    - Hook timeout in seconds. Applies per hook. If not specified, falls back to default hook timeout. Default hook timeout must be > 0 — server panics on start if it's 0.
     - When 1 hook crashes/times out, it does not stop the whole process, just log the error and continue.
     - The number of hooks being run is equal to the amount of connection in the pgxpool:
       - The system reads pgxpool config of max connections - it then forces a lock that for that amount that encompasses the transaction, Before and After hooks.
@@ -94,13 +98,18 @@ Create Postgres MCP with Golang.
     - When Read-only mode is on. Even when SET protection is off, we detect and reject any attempt to change transaction mode to write.
   - Connection pool config - max connections, min connections, idle timeout, etc - this should mirror pgxpool config options.
   - Logging config - log level, output format (json, text), output file (stdout, file path).
-  - Health check endpoint - for load balancers/k8s probes.
+  - Health check endpoint - for load balancers/k8s probes. Health check confirms the MCP server process is running and responsive — it does NOT check database connectivity.
   - Protection (each rule can be individually toggled on/off, all default on):
     - SET - disallowed.
     - DROP - disallowed.
     - TRUNCATE - disallowed.
+    - DO $$ blocks - disallowed. DO blocks can execute arbitrary SQL inside PL/pgSQL, bypassing all other protection checks.
     - DELETE - disallowed unless with WHERE clause.
     - UPDATE - disallowed unless with WHERE clause.
+    - Multi-statement queries (e.g. `SELECT 1; DROP TABLE users`) - always disallowed, cannot be toggled off.
+    - When Read-only mode is on, additionally block:
+      - `RESET ALL` and `RESET default_transaction_read_only` (could disable read-only mode).
+      - `BEGIN READ WRITE` / `START TRANSACTION READ WRITE` (explicit write transaction).
   - Max result length (in character length). Applied to the JSON result, if exceeded, truncate and append "...[truncated] Result is too long! Add limits in your query!".
   - Health check path. Defaults to `/health-check`.
 - Authentication:
@@ -147,6 +156,7 @@ Create Postgres MCP with Golang.
       "block_set": true,
       "block_drop": true,
       "block_truncate": true,
+      "block_do": true,
       "require_where_on_delete": true,
       "require_where_on_update": true
     },
@@ -192,6 +202,7 @@ Create Postgres MCP with Golang.
         {
           "pattern": "(?i)SELECT.*FROM.*users",
           "command": "/usr/local/bin/audit-query.sh",
+          "args": ["--audit", "--log-level=info"],
           "timeout_seconds": 5
         }
       ],
@@ -199,9 +210,10 @@ Create Postgres MCP with Golang.
         {
           "pattern": ".*",
           "command": "/usr/local/bin/redact-pii.sh",
+          "args": [],
           "timeout_seconds": 10
         }
       ]
-    },
+    }
   }
 ```
