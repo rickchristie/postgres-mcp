@@ -115,16 +115,30 @@ All config structs are exported (public API for library mode).
 ```go
 package pgmcp
 
+// Config is the base configuration used by library mode via New().
 type Config struct {
-    Connection   ConnectionConfig   `json:"connection"`
-    Pool         PoolConfig         `json:"pool"`
-    Server       ServerConfig       `json:"server"`
-    Logging      LoggingConfig      `json:"logging"`
-    Protection   ProtectionConfig   `json:"protection"`
-    Query        QueryConfig        `json:"query"`
-    ErrorPrompts []ErrorPromptRule  `json:"error_prompts"`
-    Sanitization []SanitizationRule `json:"sanitization"`
-    Hooks        HooksConfig        `json:"hooks"`
+    Pool                     PoolConfig         `json:"pool"`
+    Protection               ProtectionConfig   `json:"protection"`
+    Query                    QueryConfig        `json:"query"`
+    ErrorPrompts             []ErrorPromptRule  `json:"error_prompts"`
+    Sanitization             []SanitizationRule `json:"sanitization"`
+    ReadOnly                 bool               `json:"read_only"`
+    Timezone                 string             `json:"timezone"`
+    DefaultHookTimeoutSeconds int               `json:"default_hook_timeout_seconds"`
+    ServerHooks              ServerHooksConfig  `json:"server_hooks"`
+
+    // Library mode: Go function hooks (json:"-", not serializable).
+    // Mutually exclusive with ServerHooks — if Go hooks are set, ServerHooksConfig is ignored.
+    BeforeQueryHooks []BeforeQueryHookEntry `json:"-"`
+    AfterQueryHooks  []AfterQueryHookEntry  `json:"-"`
+}
+
+// ServerConfig embeds Config and adds server-only fields for CLI mode.
+type ServerConfig struct {
+    Config
+    Connection ConnectionConfig `json:"connection"`
+    Server     ServerSettings   `json:"server"`
+    Logging    LoggingConfig    `json:"logging"`
 }
 
 type ConnectionConfig struct {
@@ -142,12 +156,10 @@ type PoolConfig struct {
     HealthCheckPeriod string `json:"health_check_period"`
 }
 
-type ServerConfig struct {
+type ServerSettings struct {
     Port               int    `json:"port"`
     HealthCheckEnabled bool   `json:"health_check_enabled"`
     HealthCheckPath    string `json:"health_check_path"`
-    ReadOnly           bool   `json:"read_only"`
-    Timezone           string `json:"timezone"`
 }
 
 type LoggingConfig struct {
@@ -162,11 +174,15 @@ type ProtectionConfig struct {
     AllowTruncate           bool `json:"allow_truncate"`
     AllowDo                 bool `json:"allow_do"`
     AllowCopyFrom           bool `json:"allow_copy_from"`
+    AllowCopyTo             bool `json:"allow_copy_to"`
     AllowCreateFunction     bool `json:"allow_create_function"`
     AllowPrepare            bool `json:"allow_prepare"`
     AllowDeleteWithoutWhere bool `json:"allow_delete_without_where"`
     AllowUpdateWithoutWhere bool `json:"allow_update_without_where"`
     AllowAlterSystem        bool `json:"allow_alter_system"`
+    AllowMerge              bool `json:"allow_merge"`
+    AllowGrantRevoke        bool `json:"allow_grant_revoke"`
+    AllowManageRoles        bool `json:"allow_manage_roles"`
 }
 
 type QueryConfig struct {
@@ -193,10 +209,9 @@ type SanitizationRule struct {
     Description string `json:"description"`
 }
 
-type HooksConfig struct {
-    DefaultTimeoutSeconds int         `json:"default_timeout_seconds"`
-    BeforeQuery           []HookEntry `json:"before_query"`
-    AfterQuery            []HookEntry `json:"after_query"`
+type ServerHooksConfig struct {
+    BeforeQuery []HookEntry `json:"before_query"`
+    AfterQuery  []HookEntry `json:"after_query"`
 }
 
 type HookEntry struct {
@@ -210,7 +225,7 @@ type HookEntry struct {
 // These are used when consumers embed pgmcp as a Go library.
 // They avoid JSON serialization and work with native Go types.
 // Library hooks and command hooks are mutually exclusive —
-// if Go hooks are set, HooksConfig is ignored.
+// if Go hooks are set, ServerHooksConfig is ignored.
 
 // BeforeQueryHook can inspect and modify queries before execution.
 type BeforeQueryHook interface {
@@ -230,7 +245,7 @@ type AfterQueryHook interface {
 // BeforeQueryHookEntry wraps a BeforeQueryHook with metadata.
 type BeforeQueryHookEntry struct {
     Name    string            // Descriptive name for logging and error messages
-    Timeout time.Duration     // Per-hook timeout; 0 = use hooks.default_timeout
+    Timeout time.Duration     // Per-hook timeout; 0 = use default_hook_timeout_seconds
     Hook    BeforeQueryHook
 }
 
@@ -242,42 +257,32 @@ type AfterQueryHookEntry struct {
 }
 ```
 
-The `Config` struct includes both command-based and Go hook fields:
-
-```go
-type Config struct {
-    // ... (all fields from above) ...
-    Hooks HooksConfig `json:"hooks"` // CLI mode: command-based hooks
-
-    // Library mode: Go function hooks (json:"-", not serializable).
-    // Mutually exclusive with Hooks — if Go hooks are set, HooksConfig is ignored.
-    BeforeQueryHooks []BeforeQueryHookEntry `json:"-"`
-    AfterQueryHooks  []AfterQueryHookEntry  `json:"-"`
-}
-```
+The `Config` struct includes both command-based and Go hook fields (see definition above — `ServerHooks` for CLI command hooks, `BeforeQueryHooks`/`AfterQueryHooks` for library mode Go hooks, mutually exclusive).
 
 **Config loading logic** (internal to `pgmcp.go` or `cmd/`):
 1. Check `GOPGMCP_CONFIG_PATH` env var → use that path
 2. Otherwise use `<cwd>/.gopgmcp/config.json`
-3. Parse JSON → `Config` struct
-4. Validate: compile all regex patterns, check required fields (server.port), check timeout values > 0
+3. Parse JSON → `ServerConfig` struct (CLI mode) or `Config` struct (library mode via `New()`)
+4. Validate: compile all regex patterns, check required fields, check timeout values > 0
 5. Panic with descriptive message on validation failure — designed to catch incorrect settings at startup (see config validation philosophy below)
 
 **Config defaults** (applied before validation, when fields are zero-value):
 - `protection.*` → all `false` (Go zero-value = blocked, safe default; set to `true` to allow specific operations)
 - `query.max_result_length` → `100000` (when 0; cannot be disabled — there is no "no limit" option)
 
-**Config validation** (server panics on start if any fail — runs after defaults):
-- `server.port` must be specified and > 0
+**Config validation (base Config, runs in `New()`)** — panics on failure:
 - `pool.max_conns` must be > 0 — a zero-capacity semaphore would deadlock all queries
 - `query.default_timeout_seconds` must be > 0 — no default, user must explicitly set this
 - `query.list_tables_timeout_seconds` must be > 0 — no default, user must explicitly set this
 - `query.describe_table_timeout_seconds` must be > 0 — no default, user must explicitly set this
 - `query.max_result_length` must be > 0 (guaranteed after defaults, but explicit validation for safety)
-- `hooks.default_timeout_seconds` must be > 0 if any hooks are configured — no default, user must explicitly set this
-- `server.health_check_path` must be non-empty if `server.health_check_enabled` is true — no default, user must explicitly set this
+- `default_hook_timeout_seconds` must be > 0 if any hooks are configured (server_hooks or Go hooks) — no default, user must explicitly set this
 - All regex patterns must compile successfully
 - All per-hook and per-rule timeout values must be > 0
+
+**ServerConfig validation (additional, runs in CLI mode only)** — panics on failure:
+- `server.port` must be specified and > 0
+- `server.health_check_path` must be non-empty if `server.health_check_enabled` is true — no default, user must explicitly set this
 
 **Config validation panics intentionally.** Both CLI and library mode initialize at application startup. Missing/invalid config should crash immediately rather than produce subtle runtime failures. Library users call `New()` during initialization, so panics are caught at startup. This philosophy applies to all validation across the entire codebase: `New()` validates all config fields relevant to the library API before proceeding, and all internal package constructors (`hooks.NewRunner`, `sanitize.NewSanitizer`, `errprompt.NewMatcher`, `timeout.NewManager`) panic on invalid config (e.g., invalid regex patterns). None of these constructors return errors for configuration issues — config problems are always panics. Only runtime failures (e.g., cannot connect to database) return errors.
 
@@ -295,18 +300,22 @@ Each internal package defines its own config type to avoid circular imports with
 package protection
 
 // Config is the protection checker's own config type.
-// The pgmcp package maps ProtectionConfig + ServerConfig.ReadOnly → this.
+// The pgmcp package maps ProtectionConfig + Config.ReadOnly → this.
 type Config struct {
     AllowSet                bool
     AllowDrop               bool
     AllowTruncate           bool
     AllowDo                 bool
     AllowCopyFrom           bool
+    AllowCopyTo             bool
     AllowCreateFunction     bool
     AllowPrepare            bool
     AllowDeleteWithoutWhere bool
     AllowUpdateWithoutWhere bool
     AllowAlterSystem        bool
+    AllowMerge              bool
+    AllowGrantRevoke        bool
+    AllowManageRoles        bool
     ReadOnly                bool
 }
 
@@ -422,11 +431,17 @@ func (c *Checker) checkNode(node *pg_query.Node) error {
             return fmt.Errorf("UPDATE without WHERE clause is not allowed")
         }
 
+    case *pg_query.Node_MergeStmt:
+        if !c.config.AllowMerge {
+            return fmt.Errorf("MERGE statements are not allowed: MERGE can perform INSERT, UPDATE, and DELETE operations bypassing individual DML protection rules")
+        }
+
     case *pg_query.Node_CopyStmt:
-        // Block COPY FROM (import). COPY TO (export) is allowed.
-        // CopyStmt.IsFrom == true means COPY FROM (importing data into a table).
         if !c.config.AllowCopyFrom && n.CopyStmt.IsFrom {
             return fmt.Errorf("COPY FROM is not allowed")
+        }
+        if !c.config.AllowCopyTo && !n.CopyStmt.IsFrom {
+            return fmt.Errorf("COPY TO is not allowed: can export/exfiltrate data from tables")
         }
 
     case *pg_query.Node_CreateFunctionStmt:
@@ -453,6 +468,9 @@ func (c *Checker) checkNode(node *pg_query.Node) error {
         // executes the query, so "EXPLAIN ANALYZE DELETE FROM users" must be
         // blocked when DELETE-without-WHERE is blocked. Even plain EXPLAIN
         // is checked — the inner statement's protections still apply.
+        // Note: Only ExplainableStmts (SELECT, INSERT, UPDATE, DELETE, MERGE) can appear
+        // inside EXPLAIN. Non-explainable statements (DROP, TRUNCATE, etc.) produce parse
+        // errors before reaching this code. Verified in explain_parse_test.go.
         if n.ExplainStmt.Query != nil {
             if err := c.checkNode(n.ExplainStmt.Query); err != nil {
                 return err
@@ -465,6 +483,37 @@ func (c *Checker) checkNode(node *pg_query.Node) error {
         // Requires superuser, but dev environments often connect as superuser.
         if !c.config.AllowAlterSystem {
             return fmt.Errorf("ALTER SYSTEM is not allowed: can modify server-level configuration (shared_preload_libraries, archive_command, ssl, etc.)")
+        }
+
+    case *pg_query.Node_GrantStmt:
+        if !c.config.AllowGrantRevoke {
+            if n.GrantStmt.IsGrant {
+                return fmt.Errorf("GRANT statements are not allowed: can modify database permissions")
+            }
+            return fmt.Errorf("REVOKE statements are not allowed: can modify database permissions")
+        }
+
+    case *pg_query.Node_GrantRoleStmt:
+        if !c.config.AllowGrantRevoke {
+            if n.GrantRoleStmt.IsGrant {
+                return fmt.Errorf("GRANT ROLE is not allowed: can modify role memberships")
+            }
+            return fmt.Errorf("REVOKE ROLE is not allowed: can modify role memberships")
+        }
+
+    case *pg_query.Node_CreateRoleStmt:
+        if !c.config.AllowManageRoles {
+            return fmt.Errorf("CREATE ROLE/USER is not allowed: can create database roles with privileges")
+        }
+
+    case *pg_query.Node_AlterRoleStmt:
+        if !c.config.AllowManageRoles {
+            return fmt.Errorf("ALTER ROLE/USER is not allowed: can modify role privileges including SUPERUSER")
+        }
+
+    case *pg_query.Node_DropRoleStmt:
+        if !c.config.AllowManageRoles {
+            return fmt.Errorf("DROP ROLE/USER is not allowed: can delete database roles")
         }
 
     case *pg_query.Node_TransactionStmt:
@@ -536,7 +585,7 @@ func isTransactionReadOnlyVar(name string) bool {
 package hooks
 
 // Config is the hook runner's own config type.
-// The pgmcp package maps HooksConfig → this, converting seconds to time.Duration.
+// The pgmcp package maps ServerHooksConfig + DefaultHookTimeoutSeconds → this, converting seconds to time.Duration.
 type Config struct {
     DefaultTimeout time.Duration
     BeforeQuery    []HookEntry
@@ -606,14 +655,27 @@ func (r *Runner) executeHook(ctx context.Context, hook compiledHook, input strin
     // exec.Command(name, args...) executes the binary directly.
     cmd := exec.CommandContext(ctx, hook.command, hook.args...)
     cmd.Stdin = strings.NewReader(input)
+
+    // Capture stderr separately for logging. Stdout is the JSON response.
+    var stderr bytes.Buffer
+    cmd.Stderr = &stderr
+
     output, err := cmd.Output()
     if err != nil {
+        // Log stderr for debugging — stderr may contain diagnostic info from the hook.
+        if stderr.Len() > 0 {
+            r.logger.Warn().Str("command", hook.command).Str("stderr", stderr.String()).Msg("hook stderr output")
+        }
         // Hooks are critical guardrails — any failure stops the pipeline.
         // This covers: non-zero exit code, crash, timeout (context deadline exceeded).
         if ctx.Err() == context.DeadlineExceeded {
             return nil, fmt.Errorf("hook timed out: %s", hook.command)
         }
         return nil, fmt.Errorf("hook failed (command: %s): %w", hook.command, err)
+    }
+    // Log stderr even on success — hooks may emit warnings or debug info.
+    if stderr.Len() > 0 {
+        r.logger.Debug().Str("command", hook.command).Str("stderr", stderr.String()).Msg("hook stderr output")
     }
     return output, nil
 }
@@ -844,7 +906,7 @@ func Run(configPath string) error
 **Logic:**
 - Read existing config file if present
 - For each scalar config field: display `Field (current: value):` prompt, read input, use current if empty
-- For each array field (error_prompts, sanitization, timeout_rules, hooks.before_query, hooks.after_query):
+- For each array field (error_prompts, sanitization, timeout_rules, server_hooks.before_query, server_hooks.after_query):
   - Display current entries with indexes
   - Prompt: `[a]dd, [r]emove, [c]ontinue?`
   - On add: prompt for each sub-field one by one
@@ -868,7 +930,7 @@ type PostgresMcp struct {
     pool       *pgxpool.Pool
     semaphore  chan struct{}
     protection *protection.Checker
-    cmdHooks   *hooks.Runner          // command-based hooks (CLI mode, from HooksConfig)
+    cmdHooks   *hooks.Runner          // command-based hooks (CLI mode, from ServerHooksConfig)
     goBeforeHooks []BeforeQueryHookEntry // Go function hooks (library mode)
     goAfterHooks  []AfterQueryHookEntry  // Go function hooks (library mode)
     sanitizer  *sanitize.Sanitizer
@@ -884,8 +946,8 @@ type PostgresMcp struct {
 // Panics on invalid config. Returns error only for runtime failures (e.g., pool creation).
 func New(ctx context.Context, connString string, config Config, logger zerolog.Logger) (*PostgresMcp, error)
 
-// Close closes the connection pool.
-func (p *PostgresMcp) Close()
+// Close closes the connection pool. Accepts context for controlled shutdown.
+func (p *PostgresMcp) Close(ctx context.Context)
 ```
 
 **Goroutine safety:** All exported methods of `PostgresMcp` (`Query`, `ListTables`, `DescribeTable`) are safe for concurrent use from multiple goroutines. All internal state is either:
@@ -902,21 +964,21 @@ Each query execution creates its own data (rows, maps) and the sanitizer operate
    - `config.Query.ListTablesTimeoutSeconds` must be > 0 — no default, user must explicitly set this
    - `config.Query.DescribeTableTimeoutSeconds` must be > 0 — no default, user must explicitly set this
    - `config.Query.MaxResultLength` defaults to 100000 if 0; must be > 0 after default
-   - `config.Hooks.DefaultTimeoutSeconds` must be > 0 if any hooks are configured (command-based OR Go hooks) — no default, user must explicitly set this
+   - `config.DefaultHookTimeoutSeconds` must be > 0 if any hooks are configured (command-based OR Go hooks) — no default, user must explicitly set this
    - All per-hook and per-rule `TimeoutSeconds` must be > 0
    - All regex patterns validated by internal constructors (they panic on invalid regex)
-   - If both Go hooks (`BeforeQueryHooks`/`AfterQueryHooks`) and command hooks (`Hooks.BeforeQuery`/`Hooks.AfterQuery`) are configured, panic — they are mutually exclusive
+   - If both Go hooks (`BeforeQueryHooks`/`AfterQueryHooks`) and command hooks (`ServerHooks.BeforeQuery`/`ServerHooks.AfterQuery`) are configured, panic — they are mutually exclusive
 2. Configure `pgxpool.Config`: apply pool settings, set `DefaultQueryExecMode` to `pgx.QueryExecModeExec`.
 3. Set `AfterConnect` hook on pool config to run session-level SET commands on each new connection:
-   - If `config.Server.ReadOnly`: run `SET default_transaction_read_only = on`.
-   - If `config.Server.Timezone` is non-empty: run `SET timezone = '<value>'`. Uses `pgx.Identifier{config.Server.Timezone}.Sanitize()` — no, timezone values are not identifiers. Use parameterized query or string literal with validation. Actually, `SET timezone` does not support `$1` parameters. Use `fmt.Sprintf("SET timezone = '%s'", strings.ReplaceAll(config.Server.Timezone, "'", "''"))` to safely escape single quotes, or simply rely on Postgres to reject invalid values.
+   - If `config.ReadOnly`: run `SET default_transaction_read_only = on`.
+   - If `config.Timezone` is non-empty: run `SET timezone = '<value>'`. Uses `pgx.Identifier{config.Timezone}.Sanitize()` — no, timezone values are not identifiers. Use parameterized query or string literal with validation. Actually, `SET timezone` does not support `$1` parameters. Use `fmt.Sprintf("SET timezone = '%s'", strings.ReplaceAll(config.Timezone, "'", "''"))` to safely escape single quotes, or simply rely on Postgres to reject invalid values.
    - Both can be combined in a single `AfterConnect` function.
 4. Create `pgxpool.Pool` (returns error on connection failure — this is a runtime error, not a config error).
 5. Create semaphore: `make(chan struct{}, config.Pool.MaxConns)` — bounds concurrent query pipelines.
 6. Initialize all internal components, mapping pgmcp config types to internal package config types:
-   - `protection.NewChecker(protection.Config{AllowSet: config.Protection.AllowSet, ..., AllowCopyFrom: config.Protection.AllowCopyFrom, AllowCreateFunction: config.Protection.AllowCreateFunction, AllowPrepare: config.Protection.AllowPrepare, AllowAlterSystem: config.Protection.AllowAlterSystem, ..., ReadOnly: config.Server.ReadOnly})`
+   - `protection.NewChecker(protection.Config{AllowSet: config.Protection.AllowSet, ..., AllowCopyFrom: config.Protection.AllowCopyFrom, AllowCopyTo: config.Protection.AllowCopyTo, AllowCreateFunction: config.Protection.AllowCreateFunction, AllowPrepare: config.Protection.AllowPrepare, AllowAlterSystem: config.Protection.AllowAlterSystem, AllowMerge: config.Protection.AllowMerge, AllowGrantRevoke: config.Protection.AllowGrantRevoke, AllowManageRoles: config.Protection.AllowManageRoles, ..., ReadOnly: config.ReadOnly})`
    - If Go hooks are configured (library mode): store `config.BeforeQueryHooks` and `config.AfterQueryHooks` directly on the struct. No Runner needed.
-   - If command hooks are configured (CLI mode): `hooks.NewRunner(hooks.Config{DefaultTimeout: time.Duration(config.Hooks.DefaultTimeoutSeconds) * time.Second, ...}, logger)`
+   - If command hooks are configured (CLI mode): `hooks.NewRunner(hooks.Config{DefaultTimeout: time.Duration(config.DefaultHookTimeoutSeconds) * time.Second, ...}, logger)`
    - If no hooks: `cmdHooks` is nil, Go hook slices are nil.
    - `sanitize.NewSanitizer(mapSanitizationRules(config.Sanitization))`
    - `errprompt.NewMatcher(mapErrorPromptRules(config.ErrorPrompts))`
@@ -1006,17 +1068,28 @@ func (p *PostgresMcp) Query(ctx context.Context, input QueryInput) *QueryOutput 
         return p.handleError(err)
     }
 
-    if err := tx.Commit(queryCtx); err != nil {
-        return p.handleError(err)
+    // 7. Detect read-only vs write statement from the parsed AST.
+    // Since we enforce single-statement and have the parsed AST from protection check,
+    // we can determine whether this is a read-only query (SELECT, EXPLAIN) or a write
+    // (INSERT/UPDATE/DELETE/MERGE/etc.).
+    isReadOnly := p.isReadOnlyStatement(sql)
+
+    // 8. For read-only queries, rollback immediately (no commit needed).
+    // This frees the transaction before running AfterQuery hooks.
+    if isReadOnly {
+        tx.Rollback(ctx) // explicit rollback for clarity, deferred rollback is no-op after this
     }
 
-    // 7-9. AfterQuery hooks — bifurcated by hook type.
+    // 9. AfterQuery hooks — run BEFORE commit for write queries.
+    // This allows hooks to reject and trigger rollback for writes
+    // (e.g., force-rollback if too many rows affected).
     var finalResult *QueryOutput
     if len(p.goAfterHooks) > 0 {
         // Go hooks (library mode): pass *QueryOutput directly, no JSON round-trip.
         // Preserves full Go type information and numeric precision.
         finalResult, err = p.runGoAfterHooks(ctx, result)
         if err != nil {
+            // For write queries, deferred tx.Rollback() will undo the mutation.
             return p.handleError(err)
         }
     } else if p.cmdHooks != nil && p.cmdHooks.HasAfterQueryHooks() {
@@ -1043,27 +1116,70 @@ func (p *PostgresMcp) Query(ctx context.Context, input QueryInput) *QueryOutput 
         finalResult = result
     }
 
-    // 10. Apply sanitization (per-field, recursive into JSONB/arrays)
+    // 10. For write queries, commit AFTER hooks have approved the result.
+    // If we reach here, all AfterQuery hooks accepted. Deferred tx.Rollback() is no-op after commit.
+    if !isReadOnly {
+        if err := tx.Commit(queryCtx); err != nil {
+            return p.handleError(err)
+        }
+    }
+
+    // 11. Apply sanitization (per-field, recursive into JSONB/arrays)
     finalResult.Rows = p.sanitizer.SanitizeRows(finalResult.Rows)
 
-    // 11. Apply max result length truncation (keeps partial data — may be garbled JSON but still useful for agents)
+    // FIXME: Performance optimization — truncateIfNeeded calls json.Marshal(output.Rows)
+    // just to measure length. The MCP server will marshal the same data again when sending
+    // the response. Consider tracking result size during collectRows instead.
+    // 12. Apply max result length truncation (keeps partial data — may be garbled JSON but still useful for agents)
     p.truncateIfNeeded(finalResult)
 
     return finalResult
 }
 ```
 
+**isReadOnlyStatement helper** — uses pg_query_go to determine if a statement is read-only (SELECT, EXPLAIN without inner DML, SET, SHOW, etc.) vs write (INSERT, UPDATE, DELETE, MERGE, etc.). Since we already enforce single-statement queries, this only needs to check the top-level node type:
+
+```go
+// isReadOnlyStatement returns true if the SQL is a read-only statement.
+// The SQL has already passed protection checks (single statement, parsed successfully).
+// For read-only statements, we rollback the transaction immediately after collecting results
+// (no commit needed). For write statements, we defer commit until after AfterQuery hooks.
+func (p *PostgresMcp) isReadOnlyStatement(sql string) bool {
+    result, err := pg_query.Parse(sql)
+    if err != nil || len(result.Stmts) == 0 {
+        // If we can't parse (shouldn't happen — protection check already parsed),
+        // assume write for safety (will attempt commit).
+        return false
+    }
+    node := result.Stmts[0].Stmt
+    switch node.Node.(type) {
+    case *pg_query.Node_SelectStmt:
+        return true
+    case *pg_query.Node_ExplainStmt:
+        return true
+    case *pg_query.Node_VariableSetStmt:
+        return true // SET/RESET
+    case *pg_query.Node_VariableShowStmt:
+        return true // SHOW
+    default:
+        return false
+    }
+}
+```
+
+Note: This parses the SQL a second time (protection check already parsed it). This is acceptable since pg_query_go parsing is fast (~microseconds) and this avoids threading the parsed AST through the pipeline. If performance profiling shows this matters, the parsed result can be cached from the protection check.
+
 **Go hook execution methods (library mode):**
 
 ```go
 // runGoBeforeHooks runs Go-interface BeforeQuery hooks in middleware chain.
 // Each hook receives the (possibly modified) query from the previous hook.
-// Timeout is enforced per-hook: uses entry.Timeout if > 0, else config.Hooks.DefaultTimeoutSeconds.
+// Timeout is enforced per-hook: uses entry.Timeout if > 0, else config.DefaultHookTimeoutSeconds.
 func (p *PostgresMcp) runGoBeforeHooks(ctx context.Context, sql string) (string, error) {
     for _, entry := range p.goBeforeHooks {
         timeout := entry.Timeout
         if timeout == 0 {
-            timeout = time.Duration(p.config.Hooks.DefaultTimeoutSeconds) * time.Second
+            timeout = time.Duration(p.config.DefaultHookTimeoutSeconds) * time.Second
         }
         hookCtx, cancel := context.WithTimeout(ctx, timeout)
 
@@ -1083,12 +1199,12 @@ func (p *PostgresMcp) runGoBeforeHooks(ctx context.Context, sql string) (string,
 
 // runGoAfterHooks runs Go-interface AfterQuery hooks in middleware chain.
 // Each hook receives the *QueryOutput directly (no JSON serialization).
-// Timeout is enforced per-hook: uses entry.Timeout if > 0, else config.Hooks.DefaultTimeoutSeconds.
+// Timeout is enforced per-hook: uses entry.Timeout if > 0, else config.DefaultHookTimeoutSeconds.
 func (p *PostgresMcp) runGoAfterHooks(ctx context.Context, result *QueryOutput) (*QueryOutput, error) {
     for _, entry := range p.goAfterHooks {
         timeout := entry.Timeout
         if timeout == 0 {
-            timeout = time.Duration(p.config.Hooks.DefaultTimeoutSeconds) * time.Second
+            timeout = time.Duration(p.config.DefaultHookTimeoutSeconds) * time.Second
         }
         hookCtx, cancel := context.WithTimeout(ctx, timeout)
 
@@ -1716,19 +1832,27 @@ func (p *PostgresMcp) DescribeTable(ctx context.Context, input DescribeTableInpu
     queryCtx, cancel := context.WithTimeout(ctx, time.Duration(p.config.Query.DescribeTableTimeoutSeconds)*time.Second)
     defer cancel()
 
-    // 3. Acquire connection and execute
+    // 3. Acquire connection and execute in read-only transaction.
+    // Wrapping in a transaction ensures consistent metadata across multiple queries
+    // (columns, indexes, constraints, etc.) — concurrent DDL won't cause inconsistencies.
     conn, err := p.pool.Acquire(queryCtx)
     if err != nil {
         return nil, fmt.Errorf("failed to acquire connection: %w", err)
     }
     defer conn.Release()
 
+    tx, err := conn.Begin(queryCtx)
+    if err != nil {
+        return nil, fmt.Errorf("failed to begin transaction: %w", err)
+    }
+    defer tx.Rollback(ctx) // always rollback — read-only metadata queries, no commit needed
+
     // Construct properly-quoted identifier for $1::regclass parameters.
     // quoteIdent doubles embedded double-quotes and wraps in double-quotes,
     // ensuring names with special characters are handled correctly.
     qualName := quoteIdent(schema) + "." + quoteIdent(input.Table)
 
-    // ... run multiple pg_catalog queries using qualName for $1::regclass
+    // ... run multiple pg_catalog queries using tx (not conn) with qualName for $1::regclass
     // and separate schema/table parameters for information_schema queries ...
 }
 
@@ -1739,7 +1863,7 @@ func quoteIdent(name string) string {
 }
 ```
 
-**Implementation:** Runs multiple `pg_catalog` queries for columns, indexes, constraints, foreign keys, and partition info. Queries using `$1::regclass` receive the `qualName` parameter (properly quoted schema-qualified identifier). Queries using `information_schema` receive separate `schema` and `table` parameters. Does NOT go through the hook/protection/sanitization pipeline. Acquires the semaphore and uses `query.describe_table_timeout_seconds` for its timeout.
+**Implementation:** Runs multiple `pg_catalog` queries for columns, indexes, constraints, foreign keys, and partition info, all within a single read-only transaction (for metadata consistency). Queries using `$1::regclass` receive the `qualName` parameter (properly quoted schema-qualified identifier). Queries using `information_schema` receive separate `schema` and `table` parameters. Does NOT go through the hook/protection/sanitization pipeline. Acquires the semaphore and uses `query.describe_table_timeout_seconds` for its timeout. The transaction is always rolled back (no commit — read-only metadata queries).
 
 Must fully support **tables, views, materialized views, foreign tables, and partitioned tables** — the goal is for AI agents to have complete information to craft queries. The approach differs by object type:
 
@@ -1893,8 +2017,8 @@ Simple subcommand dispatch (no need for cobra — use `os.Args`):
 
 ```go
 func runServe() error {
-    // 1. Load config (env var path or .gopgmcp/config.json)
-    config, err := loadConfig()
+    // 1. Load ServerConfig (env var path or .gopgmcp/config.json)
+    serverConfig, err := loadServerConfig()
 
     // 2. Resolve connection string
     connString := os.Getenv("GOPGMCP_PG_CONNSTRING")
@@ -1902,15 +2026,15 @@ func runServe() error {
         // Prompt for username and password interactively
         username := promptInput("Username: ")
         password := promptPassword("Password: ")
-        connString = buildConnString(config.Connection, username, password)
+        connString = buildConnString(serverConfig.Connection, username, password)
     }
 
     // 3. Setup logger (zerolog)
-    logger := setupLogger(config.Logging)
+    logger := setupLogger(serverConfig.Logging)
 
-    // 4. Create PostgresMcp instance
-    pgMcp, err := pgmcp.New(ctx, connString, config, logger)
-    defer pgMcp.Close()
+    // 4. Create PostgresMcp instance — extract embedded Config from ServerConfig
+    pgMcp, err := pgmcp.New(ctx, connString, serverConfig.Config, logger)
+    defer pgMcp.Close(ctx)
 
     // 5. Create MCP server
     mcpServer := server.NewMCPServer("gopgmcp", "1.0.0",
@@ -1929,8 +2053,8 @@ func runServe() error {
     // We may need a custom http.ServeMux to serve both.
 
     // 8. Start listening
-    logger.Info().Int("port", config.Server.Port).Msg("starting gopgmcp server")
-    return httpServer.Start(fmt.Sprintf(":%d", config.Server.Port))
+    logger.Info().Int("port", serverConfig.Server.Port).Msg("starting gopgmcp server")
+    return httpServer.Start(fmt.Sprintf(":%d", serverConfig.Server.Port))
 }
 ```
 
@@ -1949,7 +2073,7 @@ This was verified with two tests in `mcphttp_test.go`:
 **Correct approach:** Create the mux, register both health check and the `StreamableHTTPServer` (which implements `http.Handler` via `ServeHTTP`), then pass the custom `http.Server` via `WithStreamableHTTPServer`. Order matters — the `StreamableHTTPServer` must be created before it can be registered on the mux, but the custom `http.Server` must be passed at construction time. Solution: create the `http.Server` first with the mux, pass it to the constructor, then register the handler on the mux.
 
 ```go
-addr := fmt.Sprintf(":%d", config.Server.Port)
+addr := fmt.Sprintf(":%d", serverConfig.Server.Port)
 
 // Step 1: Create the mux.
 mux := http.NewServeMux()
@@ -1957,8 +2081,8 @@ mux := http.NewServeMux()
 // Step 2: Register health check on the mux (if enabled).
 // Health check confirms MCP server process is running and responsive.
 // Does NOT check database connectivity (by design — documented in requirements).
-if config.Server.HealthCheckEnabled {
-    mux.HandleFunc(config.Server.HealthCheckPath, func(w http.ResponseWriter, r *http.Request) {
+if serverConfig.Server.HealthCheckEnabled {
+    mux.HandleFunc(serverConfig.Server.HealthCheckPath, func(w http.ResponseWriter, r *http.Request) {
         w.WriteHeader(http.StatusOK)
         w.Write([]byte(`{"status":"ok"}`))
     })
@@ -1988,7 +2112,7 @@ streamableServer := server.NewStreamableHTTPServer(mcpServer,
 mux.Handle("/mcp", streamableServer)
 
 // Step 6: Start listening.
-logger.Info().Int("port", config.Server.Port).Msg("starting gopgmcp server")
+logger.Info().Int("port", serverConfig.Server.Port).Msg("starting gopgmcp server")
 return streamableServer.Start(addr)
 ```
 
@@ -2160,9 +2284,7 @@ All tests are pure unit tests — no database needed. Default config: all `Allow
 | `TestCopyFrom_WithOptions` | `COPY users FROM '/tmp/data.csv' WITH (FORMAT csv, HEADER true)` | default | `"COPY FROM is not allowed"` |
 | `TestCopyFrom_Stdin` | `COPY users FROM STDIN` | default | `"COPY FROM is not allowed"` |
 | `TestCopyFrom_Allowed` | `COPY users FROM '/tmp/data.csv'` | AllowCopyFrom=true | allowed |
-| `TestCopyTo_Allowed` | `COPY users TO '/tmp/data.csv'` | default | allowed (COPY TO is not blocked) |
-| `TestCopyTo_Stdout` | `COPY users TO STDOUT` | default | allowed |
-| `TestCopyTo_WithQuery` | `COPY (SELECT * FROM users) TO STDOUT` | default | allowed |
+| `TestCopyFrom_AllowedDoesNotAffectCopyTo` | `COPY users TO STDOUT` | AllowCopyFrom=true | `"COPY TO is not allowed"` (separate flag) |
 
 #### CREATE FUNCTION / CREATE PROCEDURE Protection
 
@@ -2192,16 +2314,18 @@ All tests are pure unit tests — no database needed. Default config: all `Allow
 |---|---|---|---|
 | `TestExplain_SelectAllowed` | `EXPLAIN SELECT * FROM users` | default | allowed |
 | `TestExplain_AnalyzeSelectAllowed` | `EXPLAIN ANALYZE SELECT * FROM users` | default | allowed |
-| `TestExplain_DropBlocked` | `EXPLAIN DROP TABLE users` | default | `"DROP statements are not allowed"` |
-| `TestExplain_AnalyzeDropBlocked` | `EXPLAIN ANALYZE DROP TABLE users` | default | `"DROP statements are not allowed"` |
+| `TestExplain_DropParseError` | `EXPLAIN DROP TABLE users` | default | `"SQL parse error"` (DROP is not an ExplainableStmt — PostgreSQL rejects at parse level) |
+| `TestExplain_AnalyzeDropParseError` | `EXPLAIN ANALYZE DROP TABLE users` | default | `"SQL parse error"` (same — non-explainable statement) |
 | `TestExplain_DeleteWithoutWhereBlocked` | `EXPLAIN DELETE FROM users` | default | `"DELETE without WHERE clause is not allowed"` |
 | `TestExplain_AnalyzeDeleteWithoutWhereBlocked` | `EXPLAIN ANALYZE DELETE FROM users` | default | `"DELETE without WHERE clause is not allowed"` |
 | `TestExplain_DeleteWithWhereAllowed` | `EXPLAIN ANALYZE DELETE FROM users WHERE id = 1` | default | allowed |
 | `TestExplain_UpdateWithoutWhereBlocked` | `EXPLAIN ANALYZE UPDATE users SET active = false` | default | `"UPDATE without WHERE clause is not allowed"` |
 | `TestExplain_UpdateWithWhereAllowed` | `EXPLAIN ANALYZE UPDATE users SET active = false WHERE id = 1` | default | allowed |
-| `TestExplain_TruncateBlocked` | `EXPLAIN ANALYZE TRUNCATE users` | default | `"TRUNCATE statements are not allowed"` |
-| `TestExplain_DropAllowedWhenConfigured` | `EXPLAIN DROP TABLE users` | AllowDrop=true | allowed |
+| `TestExplain_TruncateParseError` | `EXPLAIN ANALYZE TRUNCATE users` | default | `"SQL parse error"` (TRUNCATE is not an ExplainableStmt) |
+| `TestExplain_DropParseErrorEvenWhenAllowed` | `EXPLAIN DROP TABLE users` | AllowDrop=true | `"SQL parse error"` (parse error occurs before protection check) |
 | `TestExplain_AnalyzeInsertAllowed` | `EXPLAIN ANALYZE INSERT INTO users (name) VALUES ('test')` | default | allowed |
+| `TestExplain_AnalyzeMergeBlocked` | `EXPLAIN ANALYZE MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN UPDATE SET name = s.name` | default | `"MERGE statements are not allowed"` |
+| `TestExplain_AnalyzeMergeAllowed` | `EXPLAIN ANALYZE MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN UPDATE SET name = s.name` | AllowMerge=true | allowed |
 | `TestExplain_CTEDeleteWithoutWhere` | `EXPLAIN ANALYZE WITH d AS (DELETE FROM users RETURNING *) SELECT * FROM d` | default | `"DELETE without WHERE clause is not allowed"` |
 
 #### DELETE/UPDATE with WHERE
@@ -2245,6 +2369,51 @@ All tests are pure unit tests — no database needed. Default config: all `Allow
 | `TestAlterSystem_SSL` | `ALTER SYSTEM SET ssl = off` | default | `"ALTER SYSTEM is not allowed"` |
 | `TestAlterSystem_Allowed` | `ALTER SYSTEM SET work_mem = '256MB'` | AllowAlterSystem=true | allowed |
 
+#### MERGE Protection
+
+| Test | SQL | Config | Expected Error Contains |
+|---|---|---|---|
+| `TestMerge_Basic` | `MERGE INTO target t USING source s ON t.id = s.id WHEN MATCHED THEN UPDATE SET name = s.name WHEN NOT MATCHED THEN INSERT (id, name) VALUES (s.id, s.name)` | default | `"MERGE statements are not allowed: MERGE can perform INSERT, UPDATE, and DELETE operations bypassing individual DML protection rules"` |
+| `TestMerge_WithDelete` | `MERGE INTO target t USING source s ON t.id = s.id WHEN MATCHED THEN DELETE` | default | `"MERGE statements are not allowed"` |
+| `TestMerge_Allowed` | `MERGE INTO target t USING source s ON t.id = s.id WHEN MATCHED THEN UPDATE SET name = s.name` | AllowMerge=true | allowed |
+
+#### COPY TO Protection
+
+| Test | SQL | Config | Expected Error Contains |
+|---|---|---|---|
+| `TestCopyTo_Stdout` | `COPY users TO STDOUT` | default | `"COPY TO is not allowed: can export/exfiltrate data from tables"` |
+| `TestCopyTo_File` | `COPY users TO '/tmp/data.csv'` | default | `"COPY TO is not allowed"` |
+| `TestCopyTo_WithQuery` | `COPY (SELECT * FROM users) TO STDOUT` | default | `"COPY TO is not allowed"` |
+| `TestCopyTo_Allowed` | `COPY users TO STDOUT` | AllowCopyTo=true | allowed |
+| `TestCopyTo_AllowedDoesNotAffectCopyFrom` | `COPY users FROM '/tmp/data.csv'` | AllowCopyTo=true | `"COPY FROM is not allowed"` (separate flag) |
+
+#### GRANT / REVOKE Protection
+
+| Test | SQL | Config | Expected Error Contains |
+|---|---|---|---|
+| `TestGrant_Table` | `GRANT SELECT ON users TO readonly_user` | default | `"GRANT statements are not allowed: can modify database permissions"` |
+| `TestGrant_AllPrivileges` | `GRANT ALL PRIVILEGES ON users TO admin_user` | default | `"GRANT statements are not allowed"` |
+| `TestRevoke_Table` | `REVOKE SELECT ON users FROM readonly_user` | default | `"REVOKE statements are not allowed: can modify database permissions"` |
+| `TestGrantRole` | `GRANT admin TO bob` | default | `"GRANT ROLE is not allowed: can modify role memberships"` |
+| `TestRevokeRole` | `REVOKE admin FROM bob` | default | `"REVOKE ROLE is not allowed: can modify role memberships"` |
+| `TestGrant_Allowed` | `GRANT SELECT ON users TO readonly_user` | AllowGrantRevoke=true | allowed |
+| `TestRevoke_Allowed` | `REVOKE SELECT ON users FROM readonly_user` | AllowGrantRevoke=true | allowed |
+| `TestGrantRole_Allowed` | `GRANT admin TO bob` | AllowGrantRevoke=true | allowed |
+
+#### Role Management Protection
+
+| Test | SQL | Config | Expected Error Contains |
+|---|---|---|---|
+| `TestCreateRole_Basic` | `CREATE ROLE testrole WITH LOGIN PASSWORD 'secret'` | default | `"CREATE ROLE/USER is not allowed: can create database roles with privileges"` |
+| `TestCreateUser` | `CREATE USER testuser WITH PASSWORD 'secret'` | default | `"CREATE ROLE/USER is not allowed"` (CREATE USER is syntactic sugar for CREATE ROLE) |
+| `TestAlterRole_Superuser` | `ALTER ROLE testrole WITH SUPERUSER` | default | `"ALTER ROLE/USER is not allowed: can modify role privileges including SUPERUSER"` |
+| `TestAlterUser` | `ALTER USER testuser SET search_path = 'public'` | default | `"ALTER ROLE/USER is not allowed"` |
+| `TestDropRole` | `DROP ROLE testrole` | default | `"DROP ROLE/USER is not allowed: can delete database roles"` |
+| `TestDropUser` | `DROP USER testuser` | default | `"DROP ROLE/USER is not allowed"` (DROP USER is syntactic sugar for DROP ROLE) |
+| `TestCreateRole_Allowed` | `CREATE ROLE testrole` | AllowManageRoles=true | allowed |
+| `TestAlterRole_Allowed` | `ALTER ROLE testrole WITH SUPERUSER` | AllowManageRoles=true | allowed |
+| `TestDropRole_Allowed` | `DROP ROLE testrole` | AllowManageRoles=true | allowed |
+
 #### Allowed Statements
 
 | Test | SQL | Config | Expected |
@@ -2257,7 +2426,8 @@ All tests are pure unit tests — no database needed. Default config: all `Allow
 | `TestAllowCreateTable` | `CREATE TABLE test (id int)` | default | allowed (not blocked by protection) |
 | `TestAllowAlterTable` | `ALTER TABLE users ADD COLUMN email text` | default | allowed |
 | `TestAllowExplain` | `EXPLAIN ANALYZE SELECT * FROM users` | default | allowed |
-| `TestAllowGrant` | `GRANT SELECT ON users TO readonly_user` | default | allowed |
+| `TestAllowDeleteWithWhere` | `DELETE FROM users WHERE id = 1` | default | allowed |
+| `TestAllowUpdateWithWhere` | `UPDATE users SET active = false WHERE id = 1` | default | allowed |
 
 #### Complex SQL / Edge Cases
 
@@ -2397,18 +2567,18 @@ These test the `runGoBeforeHooks` and `runGoAfterHooks` methods directly, using 
 | `TestLoadConfigValidation_ZeroListTablesTimeout` | config with `list_tables_timeout_seconds` = 0 | panics with message containing `"list_tables_timeout_seconds"` |
 | `TestLoadConfigValidation_ZeroDescribeTableTimeout` | config with `describe_table_timeout_seconds` = 0 | panics with message containing `"describe_table_timeout_seconds"` |
 | `TestLoadConfigValidation_NegativeTimeout` | negative timeout value | panics with message containing `"timeout"` |
-| `TestLoadConfigValidation_ZeroHookDefaultTimeout` | hooks configured but `hooks.default_timeout_seconds` = 0 | panics with message containing `"hooks.default_timeout_seconds"` |
-| `TestLoadConfigValidation_MissingHookDefaultTimeout` | hooks configured but `hooks.default_timeout_seconds` omitted | panics with message containing `"hooks.default_timeout_seconds"` (no default, must be set) |
-| `TestLoadConfigValidation_HookDefaultTimeoutNotRequiredWithoutHooks` | no hooks configured, `hooks.default_timeout_seconds` omitted | no panic (validation only applies when hooks exist) |
-| `TestLoadConfigValidation_HookTimeoutFallback` | hook with `timeout_seconds` = 0, `hooks.default_timeout_seconds` = 10 | hook uses default (10s) |
+| `TestLoadConfigValidation_ZeroHookDefaultTimeout` | hooks configured but `default_hook_timeout_seconds` = 0 | panics with message containing `"default_hook_timeout_seconds"` |
+| `TestLoadConfigValidation_MissingHookDefaultTimeout` | hooks configured but `default_hook_timeout_seconds` omitted | panics with message containing `"default_hook_timeout_seconds"` (no default, must be set) |
+| `TestLoadConfigValidation_HookDefaultTimeoutNotRequiredWithoutHooks` | no hooks configured, `default_hook_timeout_seconds` omitted | no panic (validation only applies when hooks exist) |
+| `TestLoadConfigValidation_HookTimeoutFallback` | hook with `timeout_seconds` = 0, `default_hook_timeout_seconds` = 10 | hook uses default (10s) |
 | `TestLoadConfigValidation_HealthCheckPathEmpty` | `health_check_enabled` = true, `health_check_path` = "" | panics with message containing `"health_check_path"` |
 | `TestLoadConfigValidation_HealthCheckPathNotRequiredWhenDisabled` | `health_check_enabled` = false, `health_check_path` = "" | no panic (path not needed when disabled) |
-| `TestLoadConfigProtectionDefaults` | minimal config, no protection fields | all `Allow*` fields are `false` (Go zero-value = blocked), including `AllowCopyFrom`, `AllowCreateFunction`, `AllowPrepare` |
+| `TestLoadConfigProtectionDefaults` | minimal config, no protection fields | all `Allow*` fields are `false` (Go zero-value = blocked), including `AllowCopyFrom`, `AllowCopyTo`, `AllowCreateFunction`, `AllowPrepare`, `AllowMerge`, `AllowGrantRevoke`, `AllowManageRoles` |
 | `TestLoadConfigProtectionExplicitAllow` | config with `allow_drop: true` | `AllowDrop` is `true`, all others remain `false` |
-| `TestLoadConfigProtectionNewFields` | config with `allow_copy_from: true, allow_create_function: true, allow_prepare: true` | respective fields are `true`, others remain `false` |
+| `TestLoadConfigProtectionNewFields` | config with `allow_copy_from: true, allow_copy_to: true, allow_create_function: true, allow_prepare: true, allow_merge: true, allow_grant_revoke: true, allow_manage_roles: true` | respective fields are `true`, others remain `false` |
 | `TestLoadConfigSSLMode` | config with `sslmode: "verify-full"` | `Connection.SSLMode` is `"verify-full"` |
-| `TestLoadConfigValidation_GoHooksAndCmdHooksMutuallyExclusive` | config with both `BeforeQueryHooks` (Go) and `Hooks.BeforeQuery` (command) | panics with message about mutual exclusivity |
-| `TestLoadConfigValidation_GoHooksRequireDefaultTimeout` | config with `BeforeQueryHooks` set but `hooks.default_timeout_seconds` = 0 | panics with message containing `"hooks.default_timeout_seconds"` |
+| `TestLoadConfigValidation_GoHooksAndCmdHooksMutuallyExclusive` | config with both `BeforeQueryHooks` (Go) and `ServerHooks.BeforeQuery` (command) | panics with message about mutual exclusivity |
+| `TestLoadConfigValidation_GoHooksRequireDefaultTimeout` | config with `BeforeQueryHooks` set but `default_hook_timeout_seconds` = 0 | panics with message containing `"default_hook_timeout_seconds"` |
 | `TestLoadConfigValidation_GoHooksOnlyNoCmd` | config with only `BeforeQueryHooks` (Go), no command hooks | no panic (valid configuration) |
 
 ---
@@ -2467,6 +2637,10 @@ Run with: `go test -tags=integration -race -v ./...`
 | `TestQuery_InetColumn` | Table with inet column | `SELECT ip FROM servers` | inet value returned as string (verify actual type from pgx with QueryExecModeExec) |
 | `TestQuery_CidrColumn` | Table with cidr column | `SELECT network FROM subnets` | cidr value returned as string |
 | `TestQuery_SemaphoreContention` | Config max_conns=1, hold semaphore via slow query | Attempt second query with short context timeout | Error contains `"failed to acquire query slot"` and `"connection slots are in use"` |
+| `TestQuery_AfterHookRejectRollbacksWrite` | Config with AfterQuery hook that rejects, table with data | `INSERT INTO users (name) VALUES ('rejected_row')` | Error from hook rejection. Verify table does NOT contain 'rejected_row' — transaction was rolled back. |
+| `TestQuery_AfterHookRejectSelectNoSideEffect` | Config with AfterQuery hook that rejects | `SELECT * FROM users` | Error from hook rejection. No side effect — SELECT is read-only, rollback called before hooks. |
+| `TestQuery_AfterHookAcceptCommitsWrite` | Config with AfterQuery hook that accepts, table with data | `INSERT INTO users (name) VALUES ('accepted_row') RETURNING *` | Rows returned with accepted_row. Verify table contains 'accepted_row' — transaction was committed after hooks. |
+| `TestQuery_ReadOnlyStatementRollbacksBeforeHooks` | Config with AfterQuery hook that tracks invocation time vs commit | `SELECT * FROM users` | Hook is called, but no commit occurs (rollback before hooks for SELECT). |
 | `TestQuery_ExplainAnalyzeProtection` | Table | `EXPLAIN ANALYZE DELETE FROM users` | Error: `"DELETE without WHERE clause is not allowed"` |
 | `TestQuery_UTF8Truncation` | Table with multi-byte UTF-8 data (e.g. emoji, CJK characters) | SELECT with low max_result_length | Truncated output is valid UTF-8 (no broken multi-byte sequences) |
 
@@ -2490,8 +2664,11 @@ These tests verify the Go-interface hook pipeline used in library mode. No shell
 | `TestQuery_GoAfterHook_Timeout` | Config with AfterQueryHook that sleeps longer than timeout | `SELECT 1` | Error contains `"after_query hook error: hook timed out"` and hook name |
 | `TestQuery_GoAfterHook_NoPrecisionLoss` | Config with AfterQueryHook (passthrough), table with bigint 2^53+1 | `SELECT big_id FROM ...` | Value preserved as exact int64 — no JSON round-trip, no float64 loss |
 | `TestQuery_GoAfterHook_ReceivesNativeTypes` | Config with AfterQueryHook that type-asserts result fields | `SELECT 1::bigint, 'hello'::text` | Hook receives int64 and string (not json.Number or interface{}), confirms no serialization |
+| `TestQuery_GoAfterHook_RejectRollbacksWrite` | Config with AfterQueryHook that rejects, table | `INSERT INTO users (name) VALUES ('go_rejected')` | Error from hook. Verify table does NOT contain 'go_rejected' — write rolled back. |
+| `TestQuery_GoAfterHook_AcceptCommitsWrite` | Config with AfterQueryHook that accepts, table | `INSERT INTO users (name) VALUES ('go_accepted') RETURNING *` | Row returned. Verify table contains 'go_accepted' — write committed. |
+| `TestQuery_GoAfterHook_SelectRollbacksBeforeHooks` | Config with AfterQueryHook that accepts | `SELECT * FROM users` | Result correct. Transaction rolled back before hook (read-only path). |
 | `TestQuery_GoHooksMutualExclusion` | Config with both Go hooks and command hooks configured | `New()` call | Panics with message about mutual exclusivity |
-| `TestQuery_GoHooksDefaultTimeoutRequired` | Config with Go hooks but `hooks.default_timeout_seconds` = 0 | `New()` call | Panics with message containing `"hooks.default_timeout_seconds"` |
+| `TestQuery_GoHooksDefaultTimeoutRequired` | Config with Go hooks but `default_hook_timeout_seconds` = 0 | `New()` call | Panics with message containing `"default_hook_timeout_seconds"` |
 
 #### pgx Type Verification Tests (pgflock)
 

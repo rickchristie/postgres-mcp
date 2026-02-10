@@ -29,7 +29,7 @@ Create Postgres MCP with Golang.
   - Query:
     - Returns only an output struct (no Go error). All errors (Postgres errors, protection rejections, hook rejections, Go errors) are converted into the output's error message field. This error message is then evaluated against error_prompts regex patterns for appending additional guidance.
     - Returns RAW results, formatted as JSON. Includes rows affected count for DML statements (INSERT/UPDATE/DELETE) even without RETURNING clause.
-    - The query is run in a transaction.
+    - The query is run in a transaction. AfterQuery hooks run before tx.Commit(). Since we use the SQL parser and expect exactly 1 statement, we detect whether the statement is read-only (SELECT, EXPLAIN) or a write (INSERT/UPDATE/DELETE/MERGE/etc.). For read-only queries, tx.Rollback() is called immediately after collecting results (before AfterQuery hooks) — no commit needed. For write queries, AfterQuery hooks run before tx.Commit() — if a hook rejects, the transaction is rolled back and the mutation does not persist. This allows AfterQuery hooks to act as true guardrails (e.g., force-rollback if too many rows were affected).
   - ListTables:
     - Returns list of tables in the connected database (includes views, materialized views, foreign tables, partitioned tables).
     - Can list everything that is granted to the connected user.
@@ -83,16 +83,18 @@ Create Postgres MCP with Golang.
       - If any hook rejects, the whole Query is rejected.
       - Hooks are matched against the RAW result first, then executed. If the result is modified, the next hook will be matched against the modified result.
     - Each hook entry specifies the command path and optional arguments array. The command is executed directly via Go's exec.Command (no shell), with arguments passed separately.
-    - Hook timeout in seconds. Applies per hook. If not specified, falls back to default hook timeout. Default hook timeout must be > 0, no default value — user must explicitly set this in config when hooks are configured. Server panics on start if hooks exist and this is not set.
+    - Hook timeout in seconds. Applies per hook. If not specified, falls back to `default_hook_timeout_seconds` (root-level config field, shared by both server hooks and library hooks). Must be > 0, no default value — user must explicitly set this in config when any hooks are configured (server or library). Server panics on start if hooks exist and this is not set.
     - When 1 hook crashes, times out, returns non-zero exit code, or returns unparseable (non-JSON) content, the entire query pipeline stops and is treated as an error. Hooks are a critical part of the guardrails — a failing hook means the guardrail cannot verify the query/result, so the safe default is to reject.
       - The error message must be descriptive: include which hook failed, the command path, and the reason (crash, timeout, bad exit code, parse error).
+      - Hook stderr output is logged (for debugging) but is separate from the expected JSON stdout response.
     - The number of hooks being run is equal to the amount of connection in the pgxpool:
       - The system reads pgxpool config of max connections - it then forces a lock that for that amount that encompasses the transaction, Before and After hooks.
       - This ensures predictable resource usage when deployed.
     - Hook security:
       - Go's exec.Command passes no shell context. The hook binary receives raw bytes on stdin. No injection possible at the transport level.
       - If a hook author does something reckless like eval `cat /dev/stdin`, that's on them. But the MCP server itself isn't creating the vulnerability. We need to properly document this for users.
-  - Default hook timeout in seconds.
+    - Server hooks are configured under the `server_hooks` config key (renamed from `hooks` to distinguish from library hooks).
+  - `default_hook_timeout_seconds` - root-level config field. Default hook timeout in seconds. Shared by both server hooks (command-based) and library hooks (Go interfaces). Must be > 0 when any hooks are configured.
   - Library mode hooks (Go interfaces):
     - In library mode, hooks are Go interfaces instead of command-line scripts. This avoids JSON serialization overhead, preserves Go type information, and is the natural choice for Go library consumers.
     - `BeforeQueryHook` interface: receives SQL query string, returns (possibly modified) query string or error to reject.
@@ -100,7 +102,7 @@ Create Postgres MCP with Golang.
     - No JSON round-trip for library hooks — AfterQueryHook works with Go structs directly, preserving int64 precision and all type information.
     - No regex pattern matching for library hooks — the hook function itself decides whether to act (user has full control inside their Run implementation).
     - Same timeout and pipeline-stopping behavior as command hooks — any hook failure stops the pipeline.
-    - Library hooks and command hooks are mutually exclusive — if Go hooks are set in Config, command-based HooksConfig is ignored.
+    - Library hooks and server hooks (command-based) are mutually exclusive — if Go hooks are set in Config, server hooks config is ignored.
 - MCP reads connection string through environment variable `GOPGMCP_PG_CONNSTRING`.
   - It's postgresql connection string  - so whether it's sslmode, etc. - can be specified here. It has highest priority.
   - If connection string from environment is not found, server will try to read host, port, dbname, and sslmode from configuration file.
@@ -108,26 +110,30 @@ Create Postgres MCP with Golang.
     - Username and password is then asked to the user interactively on server start.
     - This provides flexibility for users to not store username/password in config file and environment variable, providing it interactively on server start - recommended when running it locally.
 - Other configuration:
-  - HTTP port to listen on. No default port - must be specified in config file, server panics if not found.
-  - Read-only mode. If true, only allow SELECT queries and other queries that do not modify data - starts connections in read-only mode.
+  - (Server-only) HTTP port to listen on. No default port - must be specified in config file, server panics if not found.
+  - Read-only mode (`read_only`, in base Config). If true, only allow SELECT queries and other queries that do not modify data - starts connections in read-only mode.
     - When Read-only mode is on. Even when SET is allowed (`allow_set: true`), we detect and reject any attempt to change transaction mode to write.
-  - Timezone setting. Sets the session timezone on every connection via `AfterConnect` (runs `SET timezone = '<value>'`). This allows controlling the timezone for query results without enabling `allow_set`. This is critical because AI agents frequently misinterpret timestamps when the timezone is ambiguous or unexpected. If not set (empty string), the server uses the PostgreSQL server's default timezone. The value must be a valid IANA timezone name (e.g., "America/New_York", "Asia/Jakarta") or PostgreSQL timezone abbreviation (e.g., "UTC"). Postgres validates the timezone value — if invalid, the connection will fail at pool initialization.
-  - Connection pool config - max connections, min connections, idle timeout, etc - this should mirror pgxpool config options.
-  - Logging config - log level, output format (json, text), output file (stdout, file path).
-  - Health check endpoint - for load balancers/k8s probes. Health check confirms the MCP server process is running and responsive — it does NOT check database connectivity.
+  - Timezone setting (`timezone`, in base Config). Sets the session timezone on every connection via `AfterConnect` (runs `SET timezone = '<value>'`). This allows controlling the timezone for query results without enabling `allow_set`. This is critical because AI agents frequently misinterpret timestamps when the timezone is ambiguous or unexpected. If not set (empty string), the server uses the PostgreSQL server's default timezone. The value must be a valid IANA timezone name (e.g., "America/New_York", "Asia/Jakarta") or PostgreSQL timezone abbreviation (e.g., "UTC"). Postgres validates the timezone value — if invalid, the connection will fail at pool initialization.
+  - Connection pool config (in base Config) - max connections, min connections, idle timeout, etc - this should mirror pgxpool config options.
+  - (Server-only) Logging config - log level, output format (json, text), output file (stdout, file path).
+  - (Server-only) Health check endpoint - for load balancers/k8s probes. Health check confirms the MCP server process is running and responsive — it does NOT check database connectivity.
   - Protection (each rule can be individually toggled — Go zero-value `false` = blocked, which is the safe default):
     - SET - blocked by default (`allow_set: false`).
     - DROP - blocked by default (`allow_drop: false`).
     - TRUNCATE - blocked by default (`allow_truncate: false`).
     - DO $$ blocks - blocked by default (`allow_do: false`). DO blocks can execute arbitrary SQL inside PL/pgSQL, bypassing all other protection checks.
-    - COPY FROM - blocked by default (`allow_copy_from: false`). COPY FROM can bulk-import data into tables. COPY TO (export) is not blocked.
+    - COPY FROM - blocked by default (`allow_copy_from: false`). COPY FROM can bulk-import data into tables.
+    - COPY TO - blocked by default (`allow_copy_to: false`). COPY TO can export/exfiltrate data from tables.
     - CREATE FUNCTION / CREATE PROCEDURE - blocked by default (`allow_create_function: false`). These can create server-side functions containing arbitrary SQL that bypasses protection checks when called, similar to DO blocks.
     - PREPARE - blocked by default (`allow_prepare: false`). Prepared statements persist at the session level and can be executed later via EXECUTE, bypassing protection checks on the prepared content.
     - ALTER SYSTEM - blocked by default (`allow_alter_system: false`). ALTER SYSTEM modifies `postgresql.auto.conf` and can change any server-level parameter. Dangerous examples: `shared_preload_libraries` (load arbitrary libraries), `archive_command` (execute arbitrary shell commands), `ssl = off` (disable encryption), `listen_addresses = '*'` (expose to network). Requires superuser, but dev environments often connect as superuser.
     - DELETE without WHERE - blocked by default (`allow_delete_without_where: false`).
     - UPDATE without WHERE - blocked by default (`allow_update_without_where: false`).
+    - MERGE - blocked by default (`allow_merge: false`). MERGE can perform INSERT, UPDATE, and DELETE operations in a single statement, potentially bypassing individual DML protection rules.
+    - GRANT / REVOKE - blocked by default (`allow_grant_revoke: false`). Can modify database permissions and access controls.
+    - CREATE ROLE / ALTER ROLE / DROP ROLE - blocked by default (`allow_manage_roles: false`). Includes CREATE USER, DROP USER (syntactic sugar for CREATE/DROP ROLE). Can create/modify/delete database roles and their privileges, including granting SUPERUSER.
     - Multi-statement queries (e.g. `SELECT 1; DROP TABLE users`) - always blocked, cannot be toggled.
-    - EXPLAIN / EXPLAIN ANALYZE - always recurses into the inner statement and applies all protection rules. `EXPLAIN ANALYZE` actually executes the query, so `EXPLAIN ANALYZE DELETE FROM users` must be blocked when DELETE without WHERE is blocked. This is not togglable — EXPLAIN always checks its inner statement.
+    - EXPLAIN / EXPLAIN ANALYZE - always recurses into the inner statement and applies all protection rules. `EXPLAIN ANALYZE` actually executes the query, so `EXPLAIN ANALYZE DELETE FROM users` must be blocked when DELETE without WHERE is blocked. This is not togglable — EXPLAIN always checks its inner statement. Note: PostgreSQL's grammar only allows certain statements inside EXPLAIN (SELECT, INSERT, UPDATE, DELETE, MERGE) — statements like DROP, TRUNCATE, etc. inside EXPLAIN produce parse errors before reaching protection checks.
     - When Read-only mode is on, additionally block:
       - `RESET ALL` and `RESET default_transaction_read_only` (could disable read-only mode).
       - `BEGIN READ WRITE` / `START TRANSACTION READ WRITE` (explicit write transaction).
@@ -139,13 +145,17 @@ Create Postgres MCP with Golang.
   - All logs are printed out.
   - People can install as CLI tool and run as long as they have Golang.
 - This Golang MCP library is not only startable as CLI MCP server, but also a library that can be initialized and then registered as internal Agent Loop code as tool call.
-  - In library mode, PostgresMcp is instantiated with a full PostgreSQL connection string (must include credentials) and a Config object. Unlike CLI mode, library mode does not read connection details from Config.Connection fields — the connection string is the sole source of connection information.
+  - Config is split into two types to cleanly separate library and server concerns:
+    - `Config` (base) — contains all fields needed for the query engine: pool, protection, query settings, error prompts, sanitization, hooks, read_only, timezone, default_hook_timeout_seconds. Used directly by library mode via `New()`.
+    - `ServerConfig` — embeds `Config` and adds server-only fields: connection (host/port/dbname/sslmode), server settings (port, health check), and logging config. Used by CLI mode. The CLI extracts the embedded `Config` to pass to `New()`.
+  - Library mode: `New(ctx, connString, Config, logger)` returns `*PostgresMcp`. Library users provide their own connection string and logger. Server-specific fields (connection, port, health check, logging) are not needed.
+  - CLI mode: Uses `ServerConfig` which includes everything. Connection details come from `ServerConfig.Connection` (or env var). Logger is created from `ServerConfig.Logging`.
   - PostgresMcp hooks, sanitization, etc can also be passed from the Config object.
   - The API for library mode is the tool calls. For each tool (e.g. Query, ListTables, DescribeTable) - there's a function that can be called directly.
     - Each function takes context, and input struct, and returns output struct and error.
   - All tool functions (Query, ListTables, DescribeTable) are safe for concurrent use from multiple goroutines. All internal state is either immutable after construction or goroutine-safe (pgxpool, channel semaphore, zerolog).
 - Use zerolog as logger.
-- No graceful shutdown needed. If server is killed, close all connections immediately.
+- No graceful shutdown needed. If server is killed, close all connections immediately. `Close()` accepts a context parameter for library users who need controlled shutdown.
 - Config validation panics on startup (not errors). This is intentional — both CLI and library mode are expected to initialize at application startup. Missing/invalid config values should crash immediately rather than produce subtle runtime failures. Library users call `New()` during initialization, so panics are caught at startup.
 
 # Sample config JSON
@@ -183,11 +193,15 @@ Create Postgres MCP with Golang.
       "allow_truncate": false,
       "allow_do": false,
       "allow_copy_from": false,
+      "allow_copy_to": false,
       "allow_create_function": false,
       "allow_prepare": false,
       "allow_delete_without_where": false,
       "allow_update_without_where": false,
-      "allow_alter_system": false
+      "allow_alter_system": false,
+      "allow_merge": false,
+      "allow_grant_revoke": false,
+      "allow_manage_roles": false
     },
     "query": {
       "default_timeout_seconds": 30,
@@ -227,8 +241,8 @@ Create Postgres MCP with Golang.
         "description": "Mask KTP numbers"
       }
     ],
-    "hooks": {
-      "default_timeout_seconds": 10,
+    "default_hook_timeout_seconds": 10,
+    "server_hooks": {
       "before_query": [
         {
           "pattern": "(?i)SELECT.*FROM.*users",
