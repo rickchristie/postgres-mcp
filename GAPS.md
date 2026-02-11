@@ -76,19 +76,21 @@ Comprehensive comparison of the specification against the implemented code. Orga
 |---|---|---|---|
 | 1 | `TestHookStdinInput` | Verify raw SQL passed as stdin to BeforeQuery hook | `internal/hooks/hooks_test.go` |
 
-### 3.2 Go Hook Unit Tests (Section 6.3.1, lines 2911-2931)
+### ~~3.2 Go Hook Unit Tests (Section 6.3.1, lines 2911-2931)~~
 
-The spec defines these as **unit tests** (no database, calling `runGoBeforeHooks`/`runGoAfterHooks` directly). The actual `query_gohooks_test.go` implements them as **integration tests** through the full `Query()` pipeline. The following spec'd unit tests have no equivalent:
+~~The spec defines these as **unit tests** (no database, calling `runGoBeforeHooks`/`runGoAfterHooks` directly). The actual `query_gohooks_test.go` implements them as **integration tests** through the full `Query()` pipeline. The following spec'd unit tests have no equivalent:~~
 
 | # | Missing Test | Description | File |
 |---|---|---|---|
-| 1 | `TestGoBeforeHooks_Chaining` | Two hooks: first modifies, second receives modified | `query_gohooks_test.go` |
-| 2 | `TestGoBeforeHooks_ChainStopsOnReject` | First hook rejects, second never called | `query_gohooks_test.go` |
-| 3 | `TestGoBeforeHooks_PerHookTimeoutOverridesDefault` | entry.Timeout=3s overrides default=1s, hook sleeps 2s | `query_gohooks_test.go` |
-| 4 | `TestGoBeforeHooks_Empty` | No hooks configured, query passes through | `query_gohooks_test.go` |
-| 5 | `TestGoAfterHooks_Chaining` | Two hooks: first modifies, second receives modified | `query_gohooks_test.go` |
-| 6 | `TestGoAfterHooks_Empty` | No hooks configured, result passes through | `query_gohooks_test.go` |
-| 7 | `TestGoAfterHooks_PreservesTypes` | Hook type-asserts int64/string, confirms no serialization | `query_gohooks_test.go` |
+| ~~1~~ | ~~`TestGoBeforeHooks_Chaining`~~ | ~~Two hooks: first modifies, second receives modified~~ | ~~`query_gohooks_unit_test.go`~~ |
+| ~~2~~ | ~~`TestGoBeforeHooks_ChainStopsOnReject`~~ | ~~First hook rejects, second never called~~ | ~~`query_gohooks_unit_test.go`~~ |
+| ~~3~~ | ~~`TestGoBeforeHooks_PerHookTimeoutOverridesDefault`~~ | ~~entry.Timeout=3s overrides default=1s, hook sleeps 2s~~ | ~~`query_gohooks_unit_test.go`~~ |
+| ~~4~~ | ~~`TestGoBeforeHooks_Empty`~~ | ~~No hooks configured, query passes through~~ | ~~`query_gohooks_unit_test.go`~~ |
+| ~~5~~ | ~~`TestGoAfterHooks_Chaining`~~ | ~~Two hooks: first modifies, second receives modified~~ | ~~`query_gohooks_unit_test.go`~~ |
+| ~~6~~ | ~~`TestGoAfterHooks_Empty`~~ | ~~No hooks configured, result passes through~~ | ~~`query_gohooks_unit_test.go`~~ |
+| ~~7~~ | ~~`TestGoAfterHooks_PreservesTypes`~~ | ~~Hook type-asserts int64/string, confirms no serialization~~ | ~~`query_gohooks_unit_test.go`~~ |
+
+**Fixed**: All 7 unit tests implemented in `query_gohooks_unit_test.go` (package `pgmcp`, no build tag). Tests call `runGoBeforeHooks`/`runGoAfterHooks` directly with mock hook implementations, no database needed.
 
 ---
 
@@ -200,12 +202,12 @@ The following areas have **zero gaps** between spec and implementation:
 | Code/feature gaps | 3 (configure package, initialize logging, port validation) |
 | Config tests | 27 |
 | Hook tests (command) | 1 |
-| Hook tests (Go unit) | 7 |
+| ~~Hook tests (Go unit)~~ | ~~7~~ |
 | Integration tests — Query | 22 |
 | Integration tests — Go hooks | 5 |
 | Integration tests — ListTables | 5 |
 | Integration tests — DescribeTable | 6 |
 | Full pipeline test | 1 |
-| **Total** | **77 items** |
+| **Total** | **70 items** (was 77, 7 Go hook unit tests fixed) |
 
 All production code (protection, hooks, sanitize, errprompt, timeout, query pipeline, convertValue, ListTables, DescribeTable, MCP bridge, config structs) matches the spec with zero functional gaps. The gaps are almost entirely in **test coverage** and the **unimplemented configure feature**.
