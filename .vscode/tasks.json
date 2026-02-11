@@ -2,7 +2,7 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "pgflock up",
+      "label": "pgflock: Up Containers",
       "type": "shell",
       "command": "pgflock",
       "args": ["up"],
@@ -16,6 +16,25 @@
         "focus": true
       },
       "problemMatcher": []
+    },
+    {
+      "label": "gowt: Test All",
+      "type": "shell",
+      "command": "gowt",
+      "args": ["./..."],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": {
+        "kind": "test",
+        "isDefault": true
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "focus": true
+      },
+      "problemMatcher": ["$go"]
     }
   ]
 }
