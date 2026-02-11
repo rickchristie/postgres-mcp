@@ -190,6 +190,8 @@ type ProtectionConfig struct {
     AllowDDL                bool `json:"allow_ddl"`
     AllowDiscard            bool `json:"allow_discard"`
     AllowComment            bool `json:"allow_comment"`
+    AllowCreateTrigger      bool `json:"allow_create_trigger"`
+    AllowCreateRule         bool `json:"allow_create_rule"`
 }
 
 type QueryConfig struct {
@@ -335,6 +337,8 @@ type Config struct {
     AllowDDL                bool
     AllowDiscard            bool
     AllowComment            bool
+    AllowCreateTrigger      bool
+    AllowCreateRule         bool
     ReadOnly                bool
 }
 
@@ -631,14 +635,46 @@ func (c *Checker) checkNode(node *pg_query.Node) error {
             return fmt.Errorf("COMMENT ON is not allowed: modifies database object metadata")
         }
 
+    case *pg_query.Node_CreateTrigStmt:
+        if !c.config.AllowCreateTrigger {
+            return fmt.Errorf("CREATE TRIGGER is not allowed: triggers execute arbitrary function calls on every DML operation, bypassing protection checks")
+        }
+
+    case *pg_query.Node_RuleStmt:
+        if !c.config.AllowCreateRule {
+            return fmt.Errorf("CREATE RULE is not allowed: rules rewrite queries at the parser level, can silently transform statements and bypass protection checks")
+        }
+
+    case *pg_query.Node_RefreshMatViewStmt:
+        if !c.config.AllowMaintenance {
+            return fmt.Errorf("REFRESH MATERIALIZED VIEW is not allowed: can acquire ACCESS EXCLUSIVE lock (without CONCURRENTLY) and cause significant I/O load")
+        }
+
+    case *pg_query.Node_AlterExtensionStmt:
+        // ALTER EXTENSION ... UPDATE (e.g., ALTER EXTENSION foo UPDATE TO '2.0')
+        if !c.config.AllowCreateExtension {
+            return fmt.Errorf("ALTER EXTENSION is not allowed: can update extensions, loading new server-side code")
+        }
+
+    case *pg_query.Node_AlterExtensionContentsStmt:
+        // ALTER EXTENSION ... ADD/DROP (e.g., ALTER EXTENSION foo ADD TABLE bar)
+        if !c.config.AllowCreateExtension {
+            return fmt.Errorf("ALTER EXTENSION is not allowed: can modify extension contents")
+        }
+
     case *pg_query.Node_TransactionStmt:
-        // readOnly: block BEGIN READ WRITE / START TRANSACTION READ WRITE
+        // Transaction control statements are always blocked — each query runs in its own
+        // managed transaction with AfterQuery hooks running before commit. Allowing raw
+        // transaction control would interfere with the pipeline's transaction management
+        // and could bypass AfterQuery hook guardrails.
+        //
+        // Exception: in read-only mode, we give more specific error messages for
+        // BEGIN READ WRITE attempts before the general block.
         if c.config.ReadOnly {
             txStmt := n.TransactionStmt
             for _, opt := range txStmt.Options {
                 if defElem, ok := opt.Node.(*pg_query.Node_DefElem); ok {
                     if defElem.DefElem.Defname == "transaction_read_only" {
-                        // Check if the value is false (= READ WRITE)
                         if intVal, ok := defElem.DefElem.Arg.Node.(*pg_query.Node_Integer); ok {
                             if intVal.Integer.Ival == 0 { // 0 = false = READ WRITE
                                 return fmt.Errorf("BEGIN READ WRITE is blocked in read-only mode: cannot start a read-write transaction")
@@ -648,6 +684,7 @@ func (c *Checker) checkNode(node *pg_query.Node) error {
                 }
             }
         }
+        return fmt.Errorf("transaction control statements are not allowed: each query runs in a managed transaction with AfterQuery hooks as guardrails")
     }
     return nil
 }
@@ -666,6 +703,8 @@ func (c *Checker) checkCTEs(node *pg_query.Node) error {
         withClause = n.UpdateStmt.WithClause
     case *pg_query.Node_DeleteStmt:
         withClause = n.DeleteStmt.WithClause
+    case *pg_query.Node_MergeStmt:
+        withClause = n.MergeStmt.WithClause
     }
     if withClause == nil {
         return nil
@@ -1098,8 +1137,9 @@ Each query execution creates its own data (rows, maps) and the sanitizer operate
    - `config.Query.MaxResultLength` defaults to 100000 if 0; must be > 0 after default
    - `config.DefaultHookTimeoutSeconds` must be > 0 if any hooks are configured (Go hooks) — no default, user must explicitly set this
    - All per-hook and per-rule `TimeoutSeconds` must be > 0
+   - Pool duration strings (`MaxConnLifetime`, `MaxConnIdleTime`, `HealthCheckPeriod`) parsed via `time.ParseDuration()` — panics on invalid format (e.g., `"1h"` valid, `"forever"` invalid)
    - All regex patterns validated by internal constructors (they panic on invalid regex)
-2. Configure `pgxpool.Config`: apply pool settings, set `DefaultQueryExecMode` to `pgx.QueryExecModeExec`.
+2. Configure `pgxpool.Config`: apply pool settings, set `DefaultQueryExecMode` to `pgx.QueryExecModeExec`. Pool duration fields (`MaxConnLifetime`, `MaxConnIdleTime`, `HealthCheckPeriod`) are strings in JSON config (e.g., `"1h"`, `"30m"`, `"1m"`) — parsed via `time.ParseDuration()` during config loading. If parsing fails, config validation panics with a descriptive error including the field name and invalid value.
 3. Set `AfterConnect` hook on pool config to run session-level SET commands on each new connection:
    - If `config.ReadOnly`: run `SET default_transaction_read_only = on`.
    - If `config.Timezone` is non-empty: run `SET timezone = '<value>'`. Uses `pgx.Identifier{config.Timezone}.Sanitize()` — no, timezone values are not identifiers. Use parameterized query or string literal with validation. Actually, `SET timezone` does not support `$1` parameters. Use `fmt.Sprintf("SET timezone = '%s'", strings.ReplaceAll(config.Timezone, "'", "''"))` to safely escape single quotes, or simply rely on Postgres to reject invalid values.
@@ -1107,7 +1147,7 @@ Each query execution creates its own data (rows, maps) and the sanitizer operate
 4. Create `pgxpool.Pool` (returns error on connection failure — this is a runtime error, not a config error).
 5. Create semaphore: `make(chan struct{}, config.Pool.MaxConns)` — bounds concurrent query pipelines.
 6. Initialize all internal components, mapping pgmcp config types to internal package config types:
-   - `protection.NewChecker(protection.Config{AllowSet: config.Protection.AllowSet, ..., AllowCopyFrom: config.Protection.AllowCopyFrom, AllowCopyTo: config.Protection.AllowCopyTo, AllowCreateFunction: config.Protection.AllowCreateFunction, AllowPrepare: config.Protection.AllowPrepare, AllowAlterSystem: config.Protection.AllowAlterSystem, AllowMerge: config.Protection.AllowMerge, AllowGrantRevoke: config.Protection.AllowGrantRevoke, AllowManageRoles: config.Protection.AllowManageRoles, AllowCreateExtension: config.Protection.AllowCreateExtension, AllowLockTable: config.Protection.AllowLockTable, AllowListenNotify: config.Protection.AllowListenNotify, AllowMaintenance: config.Protection.AllowMaintenance, AllowDDL: config.Protection.AllowDDL, AllowDiscard: config.Protection.AllowDiscard, AllowComment: config.Protection.AllowComment, ReadOnly: config.ReadOnly})`
+   - `protection.NewChecker(protection.Config{AllowSet: config.Protection.AllowSet, ..., AllowCopyFrom: config.Protection.AllowCopyFrom, AllowCopyTo: config.Protection.AllowCopyTo, AllowCreateFunction: config.Protection.AllowCreateFunction, AllowPrepare: config.Protection.AllowPrepare, AllowAlterSystem: config.Protection.AllowAlterSystem, AllowMerge: config.Protection.AllowMerge, AllowGrantRevoke: config.Protection.AllowGrantRevoke, AllowManageRoles: config.Protection.AllowManageRoles, AllowCreateExtension: config.Protection.AllowCreateExtension, AllowLockTable: config.Protection.AllowLockTable, AllowListenNotify: config.Protection.AllowListenNotify, AllowMaintenance: config.Protection.AllowMaintenance, AllowDDL: config.Protection.AllowDDL, AllowDiscard: config.Protection.AllowDiscard, AllowComment: config.Protection.AllowComment, AllowCreateTrigger: config.Protection.AllowCreateTrigger, AllowCreateRule: config.Protection.AllowCreateRule, ReadOnly: config.ReadOnly})`
    - If Go hooks are configured (library mode): store `config.BeforeQueryHooks` and `config.AfterQueryHooks` directly on the struct. No Runner needed.
    - If command hooks are configured (via `WithServerHooks` option): `hooks.NewRunner(hooks.Config{DefaultTimeout: time.Duration(config.DefaultHookTimeoutSeconds) * time.Second, ...}, logger)`. Panics if Go hooks are also configured (mutually exclusive).
    - If no hooks: `cmdHooks` is nil, Go hook slices are nil.
@@ -1255,6 +1295,16 @@ func (p *PostgresMcp) Query(ctx context.Context, input QueryInput) *QueryOutput 
 
     // 11. For write queries, commit AFTER hooks have approved the result.
     // If we reach here, all AfterQuery hooks accepted. Deferred tx.Rollback() is no-op after commit.
+    //
+    // DESIGN NOTE: Commit uses queryCtx (not parent ctx) intentionally. The query timeout
+    // covers the entire database operation lifecycle: query execution + commit. This means
+    // if AfterQuery hooks consume significant time (they run with their own timeouts on the
+    // parent ctx), the remaining queryCtx budget may be insufficient for commit. This is the
+    // desired behavior — it ensures the entire pipeline (query + hooks + commit) completes
+    // within the query timeout. If it doesn't, the commit fails and the transaction is rolled
+    // back by the deferred tx.Rollback(ctx), providing a safety guarantee: no write persists
+    // unless the full pipeline (including hooks) completes within the timeout. Users should
+    // set query timeouts that account for both query execution and hook processing time.
     if !isReadOnly {
         if err := tx.Commit(queryCtx); err != nil {
             return p.handleError(err)
@@ -1304,7 +1354,8 @@ func (p *PostgresMcp) isReadOnlyStatement(sql string) bool {
         return true
     case *pg_query.Node_VariableSetStmt:
         return true // SET/RESET — classified as read-only, so the transaction is rolled back.
-        // This means SET commands through the Query tool have no lasting effect on the session,
+        // Note: SET is blocked by default (AllowSet=false), so this case is only reached
+        // when AllowSet=true. Even when allowed, SET has no lasting effect on the session
         // because PostgreSQL undoes SET within a rolled-back transaction. This is intentional:
         // session-level settings should be configured via Config.Timezone / Config.ReadOnly
         // (applied in AfterConnect), not via ad-hoc SET through the query tool.
@@ -1768,13 +1819,18 @@ The actual Go types returned by `rows.Values()` with `QueryExecModeExec` have be
 - `float32`/`float64` NaN/+Inf/-Inf from Postgres real/double precision columns break `json.Marshal` — must convert to string representations.
 - `pgtype.Numeric` Infinity values panic in `MarshalJSON()` — must check `InfinityModifier` before calling it.
 
-**truncateForLog helper** — truncates SQL for log output to avoid oversized log entries:
+**truncateForLog helper** — truncates SQL for log output to avoid oversized log entries. Uses `utf8.RuneStart()` to avoid slicing mid-character (same approach as `truncateIfNeeded`):
 ```go
 func truncateForLog(s string, maxLen int) string {
     if len(s) <= maxLen {
         return s
     }
-    return s[:maxLen] + "...[truncated]"
+    // Back up to the nearest valid UTF-8 boundary to avoid slicing mid-character.
+    truncateAt := maxLen
+    for truncateAt > 0 && !utf8.RuneStart(s[truncateAt]) {
+        truncateAt--
+    }
+    return s[:truncateAt] + "...[truncated]"
 }
 ```
 
@@ -2552,8 +2608,8 @@ All tests are pure unit tests — no database needed. Default config: all `Allow
 | `TestReadOnly_AllowsResetOther` | `RESET work_mem` | ReadOnly=true, AllowSet=true | allowed |
 | `TestReadOnly_BlocksBeginReadWrite` | `BEGIN READ WRITE` | ReadOnly=true | `"BEGIN READ WRITE is blocked in read-only mode: cannot start a read-write transaction"` |
 | `TestReadOnly_BlocksStartTransactionReadWrite` | `START TRANSACTION READ WRITE` | ReadOnly=true | `"BEGIN READ WRITE is blocked in read-only mode: cannot start a read-write transaction"` |
-| `TestReadOnly_AllowsBeginReadOnly` | `BEGIN READ ONLY` | ReadOnly=true | allowed |
-| `TestReadOnly_AllowsBeginDefault` | `BEGIN` | ReadOnly=true | allowed |
+| `TestReadOnly_BeginReadOnlyStillBlocked` | `BEGIN READ ONLY` | ReadOnly=true | `"transaction control statements are not allowed"` (transaction control always blocked, regardless of read-only mode) |
+| `TestReadOnly_BeginStillBlocked` | `BEGIN` | ReadOnly=true | `"transaction control statements are not allowed"` (transaction control always blocked) |
 | `TestReadOnly_AllowsOtherSet` | `SET search_path = 'public'` | ReadOnly=true, AllowSet=true | allowed |
 | `TestReadOnly_SetBlockedTakesPriority` | `SET default_transaction_read_only = off` | ReadOnly=true, AllowSet=false | `"SET default_transaction_read_only is blocked in read-only mode"` (readOnly check runs first) |
 
@@ -2654,6 +2710,9 @@ All tests are pure unit tests — no database needed. Default config: all `Allow
 | `TestAnalyze_Allowed` | `ANALYZE users` | AllowMaintenance=true | allowed |
 | `TestCluster_Allowed` | `CLUSTER users USING users_pkey` | AllowMaintenance=true | allowed |
 | `TestReindex_Allowed` | `REINDEX TABLE users` | AllowMaintenance=true | allowed |
+| `TestRefreshMatView_Basic` | `REFRESH MATERIALIZED VIEW my_view` | default | `"REFRESH MATERIALIZED VIEW is not allowed: can acquire ACCESS EXCLUSIVE lock (without CONCURRENTLY) and cause significant I/O load"` |
+| `TestRefreshMatView_Concurrently` | `REFRESH MATERIALIZED VIEW CONCURRENTLY my_view` | default | `"REFRESH MATERIALIZED VIEW is not allowed"` |
+| `TestRefreshMatView_Allowed` | `REFRESH MATERIALIZED VIEW my_view` | AllowMaintenance=true | allowed |
 
 #### DDL Protection (CREATE TABLE, ALTER TABLE, CREATE INDEX, etc.)
 
@@ -2690,6 +2749,68 @@ All tests are pure unit tests — no database needed. Default config: all `Allow
 | `TestComment_OnColumn` | `COMMENT ON COLUMN users.name IS 'Full name'` | default | `"COMMENT ON is not allowed"` |
 | `TestComment_Allowed` | `COMMENT ON TABLE users IS 'User accounts'` | AllowComment=true | allowed |
 
+#### CREATE TRIGGER Protection
+
+| Test | SQL | Config | Expected Error Contains |
+|---|---|---|---|
+| `TestCreateTrigger_Basic` | `CREATE TRIGGER trg_audit AFTER INSERT ON users FOR EACH ROW EXECUTE FUNCTION audit_func()` | default | `"CREATE TRIGGER is not allowed: triggers execute arbitrary function calls on every DML operation, bypassing protection checks"` |
+| `TestCreateTrigger_Before` | `CREATE TRIGGER trg_before BEFORE UPDATE ON users FOR EACH ROW EXECUTE FUNCTION check_func()` | default | `"CREATE TRIGGER is not allowed"` |
+| `TestCreateTrigger_OrReplace` | `CREATE OR REPLACE TRIGGER trg_audit AFTER INSERT ON users FOR EACH ROW EXECUTE FUNCTION audit_func()` | default | `"CREATE TRIGGER is not allowed"` |
+| `TestCreateTrigger_Statement` | `CREATE TRIGGER trg_stmt AFTER INSERT ON users FOR EACH STATEMENT EXECUTE FUNCTION notify_func()` | default | `"CREATE TRIGGER is not allowed"` |
+| `TestCreateTrigger_Constraint` | `CREATE CONSTRAINT TRIGGER trg_fk AFTER INSERT ON orders FOR EACH ROW EXECUTE FUNCTION check_fk()` | default | `"CREATE TRIGGER is not allowed"` |
+| `TestCreateTrigger_InsteadOf` | `CREATE TRIGGER trg_view INSTEAD OF INSERT ON my_view FOR EACH ROW EXECUTE FUNCTION view_insert()` | default | `"CREATE TRIGGER is not allowed"` |
+| `TestCreateTrigger_Allowed` | `CREATE TRIGGER trg_audit AFTER INSERT ON users FOR EACH ROW EXECUTE FUNCTION audit_func()` | AllowCreateTrigger=true | allowed |
+
+#### CREATE RULE Protection
+
+| Test | SQL | Config | Expected Error Contains |
+|---|---|---|---|
+| `TestCreateRule_Basic` | `CREATE RULE notify_insert AS ON INSERT TO users DO ALSO NOTIFY users_changed` | default | `"CREATE RULE is not allowed: rules rewrite queries at the parser level, can silently transform statements and bypass protection checks"` |
+| `TestCreateRule_OrReplace` | `CREATE OR REPLACE RULE notify_insert AS ON INSERT TO users DO ALSO NOTIFY users_changed` | default | `"CREATE RULE is not allowed"` |
+| `TestCreateRule_Instead` | `CREATE RULE protect_delete AS ON DELETE TO users DO INSTEAD NOTHING` | default | `"CREATE RULE is not allowed"` |
+| `TestCreateRule_WithAction` | `CREATE RULE log_update AS ON UPDATE TO users DO ALSO INSERT INTO audit_log (action) VALUES ('update')` | default | `"CREATE RULE is not allowed"` |
+| `TestCreateRule_Allowed` | `CREATE RULE notify_insert AS ON INSERT TO users DO ALSO NOTIFY users_changed` | AllowCreateRule=true | allowed |
+
+#### REFRESH MATERIALIZED VIEW Protection
+
+| Test | SQL | Config | Expected Error Contains |
+|---|---|---|---|
+| `TestRefreshMatView_Basic` | `REFRESH MATERIALIZED VIEW my_view` | default | `"REFRESH MATERIALIZED VIEW is not allowed: can acquire ACCESS EXCLUSIVE lock (without CONCURRENTLY) and cause significant I/O load"` |
+| `TestRefreshMatView_Concurrently` | `REFRESH MATERIALIZED VIEW CONCURRENTLY my_view` | default | `"REFRESH MATERIALIZED VIEW is not allowed"` |
+| `TestRefreshMatView_WithNoData` | `REFRESH MATERIALIZED VIEW my_view WITH NO DATA` | default | `"REFRESH MATERIALIZED VIEW is not allowed"` |
+| `TestRefreshMatView_Allowed` | `REFRESH MATERIALIZED VIEW my_view` | AllowMaintenance=true | allowed |
+
+#### ALTER EXTENSION Protection
+
+| Test | SQL | Config | Expected Error Contains |
+|---|---|---|---|
+| `TestAlterExtension_Update` | `ALTER EXTENSION pg_trgm UPDATE TO '1.6'` | default | `"ALTER EXTENSION is not allowed: can update extensions, loading new server-side code"` |
+| `TestAlterExtension_UpdateNoVersion` | `ALTER EXTENSION pg_trgm UPDATE` | default | `"ALTER EXTENSION is not allowed"` |
+| `TestAlterExtension_AddTable` | `ALTER EXTENSION pg_trgm ADD TABLE my_table` | default | `"ALTER EXTENSION is not allowed: can modify extension contents"` |
+| `TestAlterExtension_DropFunction` | `ALTER EXTENSION pg_trgm DROP FUNCTION my_func()` | default | `"ALTER EXTENSION is not allowed"` |
+| `TestAlterExtension_Allowed` | `ALTER EXTENSION pg_trgm UPDATE TO '1.6'` | AllowCreateExtension=true | allowed |
+| `TestAlterExtension_AddAllowed` | `ALTER EXTENSION pg_trgm ADD TABLE my_table` | AllowCreateExtension=true | allowed |
+
+#### Transaction Control Protection (always blocked)
+
+| Test | SQL | Config | Expected Error Contains |
+|---|---|---|---|
+| `TestTransaction_Begin` | `BEGIN` | default | `"transaction control statements are not allowed: each query runs in a managed transaction with AfterQuery hooks as guardrails"` |
+| `TestTransaction_StartTransaction` | `START TRANSACTION` | default | `"transaction control statements are not allowed"` |
+| `TestTransaction_Commit` | `COMMIT` | default | `"transaction control statements are not allowed"` |
+| `TestTransaction_End` | `END` | default | `"transaction control statements are not allowed"` |
+| `TestTransaction_Rollback` | `ROLLBACK` | default | `"transaction control statements are not allowed"` |
+| `TestTransaction_Abort` | `ABORT` | default | `"transaction control statements are not allowed"` |
+| `TestTransaction_Savepoint` | `SAVEPOINT my_savepoint` | default | `"transaction control statements are not allowed"` |
+| `TestTransaction_ReleaseSavepoint` | `RELEASE SAVEPOINT my_savepoint` | default | `"transaction control statements are not allowed"` |
+| `TestTransaction_RollbackToSavepoint` | `ROLLBACK TO SAVEPOINT my_savepoint` | default | `"transaction control statements are not allowed"` |
+| `TestTransaction_PrepareTransaction` | `PREPARE TRANSACTION 'my_tx'` | default | `"transaction control statements are not allowed"` |
+| `TestTransaction_CommitPrepared` | `COMMIT PREPARED 'my_tx'` | default | `"transaction control statements are not allowed"` |
+| `TestTransaction_RollbackPrepared` | `ROLLBACK PREPARED 'my_tx'` | default | `"transaction control statements are not allowed"` |
+| `TestTransaction_CannotBeEnabled` | `BEGIN` | all Allow* = true | still blocked — `"transaction control statements are not allowed"` (always enforced, no toggle) |
+| `TestTransaction_BeginReadWriteReadOnlyMode` | `BEGIN READ WRITE` | ReadOnly=true | `"BEGIN READ WRITE is blocked in read-only mode"` (more specific message takes priority) |
+| `TestTransaction_BeginReadOnlyReadOnlyMode` | `BEGIN READ ONLY` | ReadOnly=true | `"transaction control statements are not allowed"` (read-only BEGIN still blocked — pipeline manages transactions) |
+
 #### Allowed Statements
 
 | Test | SQL | Config | Expected |
@@ -2719,6 +2840,9 @@ All tests are pure unit tests — no database needed. Default config: all `Allow
 | `TestCTEOnDelete` | `WITH src AS (SELECT id FROM banned) DELETE FROM users WHERE id IN (SELECT id FROM src)` | default | allowed (DELETE has WHERE, CTE is SELECT) |
 | `TestCTESelectOnly` | `WITH counts AS (SELECT department, COUNT(*) as cnt FROM employees GROUP BY department) SELECT * FROM counts` | default | allowed (CTE is SELECT, no DML) |
 | `TestCTEMultipleDML` | `WITH d AS (DELETE FROM old_users WHERE expired = true RETURNING *), i AS (INSERT INTO archive SELECT * FROM d RETURNING *) SELECT * FROM i` | default | allowed (DELETE has WHERE, INSERT has no protection check) |
+| `TestCTEOnMerge_DeleteNoWhere` | `WITH d AS (DELETE FROM users RETURNING *) MERGE INTO target t USING d ON t.id = d.id WHEN MATCHED THEN UPDATE SET name = d.name` | AllowMerge=true | `"DELETE without WHERE clause is not allowed"` (CTE on MERGE checked recursively) |
+| `TestCTEOnMerge_SelectCTE` | `WITH src AS (SELECT * FROM staging) MERGE INTO target t USING src ON t.id = src.id WHEN MATCHED THEN UPDATE SET name = src.name` | AllowMerge=true | allowed (CTE is SELECT, MERGE is allowed) |
+| `TestCTEOnMerge_UpdateNoWhere` | `WITH u AS (UPDATE users SET active = false RETURNING *) MERGE INTO target t USING u ON t.id = u.id WHEN NOT MATCHED THEN INSERT (id) VALUES (u.id)` | AllowMerge=true | `"UPDATE without WHERE clause is not allowed"` (CTE on MERGE checked recursively) |
 | `TestNestedSubquerySelect` | `SELECT * FROM (SELECT * FROM (SELECT id FROM users) AS a) AS b` | default | allowed |
 | `TestComplexJoins` | `SELECT u.*, o.* FROM users u JOIN orders o ON u.id = o.user_id LEFT JOIN items i ON o.id = i.order_id WHERE u.active = true` | default | allowed |
 | `TestWindowFunction` | `SELECT id, name, ROW_NUMBER() OVER (PARTITION BY department ORDER BY salary DESC) FROM employees` | default | allowed |
@@ -2850,9 +2974,9 @@ These test the `runGoBeforeHooks` and `runGoAfterHooks` methods directly, using 
 | `TestLoadConfigValidation_HealthCheckPathEmpty` | `health_check_enabled` = true, `health_check_path` = "" | panics with message containing `"health_check_path"` |
 | `TestLoadConfigValidation_HealthCheckPathNotRequiredWhenDisabled` | `health_check_enabled` = false, `health_check_path` = "" | no panic (path not needed when disabled) |
 | `TestLoadConfigDefaults_MaxSQLLength` | config with `max_sql_length` omitted (0) | defaults to `100000` |
-| `TestLoadConfigProtectionDefaults` | minimal config, no protection fields | all `Allow*` fields are `false` (Go zero-value = blocked), including `AllowCopyFrom`, `AllowCopyTo`, `AllowCreateFunction`, `AllowPrepare`, `AllowMerge`, `AllowGrantRevoke`, `AllowManageRoles`, `AllowCreateExtension`, `AllowLockTable`, `AllowListenNotify`, `AllowMaintenance`, `AllowDDL`, `AllowDiscard`, `AllowComment` |
+| `TestLoadConfigProtectionDefaults` | minimal config, no protection fields | all `Allow*` fields are `false` (Go zero-value = blocked), including `AllowCopyFrom`, `AllowCopyTo`, `AllowCreateFunction`, `AllowPrepare`, `AllowMerge`, `AllowGrantRevoke`, `AllowManageRoles`, `AllowCreateExtension`, `AllowLockTable`, `AllowListenNotify`, `AllowMaintenance`, `AllowDDL`, `AllowDiscard`, `AllowComment`, `AllowCreateTrigger`, `AllowCreateRule` |
 | `TestLoadConfigProtectionExplicitAllow` | config with `allow_drop: true` | `AllowDrop` is `true`, all others remain `false` |
-| `TestLoadConfigProtectionNewFields` | config with `allow_copy_from: true, allow_copy_to: true, allow_create_function: true, allow_prepare: true, allow_merge: true, allow_grant_revoke: true, allow_manage_roles: true, allow_create_extension: true, allow_lock_table: true, allow_listen_notify: true, allow_maintenance: true, allow_ddl: true, allow_discard: true, allow_comment: true` | respective fields are `true`, others remain `false` |
+| `TestLoadConfigProtectionNewFields` | config with `allow_copy_from: true, allow_copy_to: true, allow_create_function: true, allow_prepare: true, allow_merge: true, allow_grant_revoke: true, allow_manage_roles: true, allow_create_extension: true, allow_lock_table: true, allow_listen_notify: true, allow_maintenance: true, allow_ddl: true, allow_discard: true, allow_comment: true, allow_create_trigger: true, allow_create_rule: true` | respective fields are `true`, others remain `false` |
 | `TestLoadConfigSSLMode` | config with `sslmode: "verify-full"` | `Connection.SSLMode` is `"verify-full"` |
 | `TestLoadConfigValidation_GoHooksAndCmdHooksMutuallyExclusive` | config with both `BeforeQueryHooks` (Go) and `WithServerHooks` option (command) | panics with message about mutual exclusivity |
 | `TestLoadConfigValidation_GoHooksRequireDefaultTimeout` | config with `BeforeQueryHooks` set but `default_hook_timeout_seconds` = 0 | panics with message containing `"default_hook_timeout_seconds"` |
@@ -2926,6 +3050,11 @@ Run with: `go test -tags=integration -race -v ./...`
 | `TestQuery_DDLAllowed` | Config with AllowDDL=true | `CREATE TABLE test (id int)` | Table created successfully |
 | `TestQuery_CreateExtensionBlocked` | Default config | `CREATE EXTENSION IF NOT EXISTS pg_trgm` | Error: `"CREATE EXTENSION is not allowed"` |
 | `TestQuery_MaintenanceBlocked` | Default config | `ANALYZE users` | Error: `"VACUUM/ANALYZE is not allowed"` |
+| `TestQuery_CreateTriggerBlocked` | Default config | `CREATE TRIGGER trg AFTER INSERT ON users FOR EACH ROW EXECUTE FUNCTION audit()` | Error: `"CREATE TRIGGER is not allowed"` |
+| `TestQuery_CreateRuleBlocked` | Default config | `CREATE RULE r AS ON INSERT TO users DO ALSO NOTIFY users_changed` | Error: `"CREATE RULE is not allowed"` |
+| `TestQuery_TransactionControlBlocked` | Default config | `BEGIN` | Error: `"transaction control statements are not allowed"` |
+| `TestQuery_CommitBlocked` | Default config | `COMMIT` | Error: `"transaction control statements are not allowed"` |
+| `TestQuery_AlterExtensionBlocked` | Default config | `ALTER EXTENSION pg_trgm UPDATE` | Error: `"ALTER EXTENSION is not allowed"` |
 
 #### Go Hook Integration Tests (Library Mode)
 
@@ -3337,7 +3466,7 @@ Must include:
    - Connection (host, port, dbname, sslmode) — used when `GOPGMCP_PG_CONNSTRING` env var is not set
    - Pool settings (mirrors pgxpool config)
    - Server settings (port, read_only, timezone, health check)
-   - Protection rules (SET, DROP, TRUNCATE, DO blocks, DELETE/UPDATE WHERE, DDL, CREATE EXTENSION, LOCK TABLE, LISTEN/NOTIFY, maintenance, DISCARD, COMMENT ON, MERGE, GRANT/REVOKE, role management) — all blocked by default (`false` = blocked, `true` = allowed)
+   - Protection rules (SET, DROP, TRUNCATE, DO blocks, DELETE/UPDATE WHERE, DDL, CREATE EXTENSION/ALTER EXTENSION, CREATE TRIGGER, CREATE RULE, LOCK TABLE, LISTEN/NOTIFY, maintenance (VACUUM/ANALYZE/CLUSTER/REINDEX/REFRESH MATERIALIZED VIEW), DISCARD, COMMENT ON, MERGE, GRANT/REVOKE, role management, transaction control) — togglable ones blocked by default (`false` = blocked, `true` = allowed); transaction control always blocked (no toggle)
    - Query settings (default timeout, max SQL length, max result length, timeout rules)
    - Error prompts (regex → message, evaluated against ALL errors including hook/Go errors)
    - Sanitization rules (regex → replacement, applied per-field recursively into JSONB/arrays)
@@ -3373,9 +3502,11 @@ Must include:
 9. **Known limitations:**
    - `QueryExecModeExec` (simple protocol) prevents SQL injection and multi-statement queries but may affect type mapping for some Postgres types
    - Multi-statement queries are always rejected (cannot be toggled off)
-   - Protection checks work at the SQL AST level — they cannot inspect dynamic SQL inside PL/pgSQL functions (DO blocks and CREATE FUNCTION/PROCEDURE are blocked by default)
+   - Transaction control statements (BEGIN, COMMIT, ROLLBACK, SAVEPOINT, etc.) are always blocked — each query runs in its own managed transaction with AfterQuery hooks as guardrails
+   - Protection checks work at the SQL AST level — they cannot inspect dynamic SQL inside PL/pgSQL functions (DO blocks, CREATE FUNCTION/PROCEDURE, and CREATE TRIGGER are blocked by default)
    - EXPLAIN ANALYZE always checks its inner statement against protection rules
-   - SET commands through the Query tool are rolled back (intentional — session settings should use Config.Timezone/ReadOnly via AfterConnect)
+   - SET commands through the Query tool are blocked by default (AllowSet=false). Even when allowed, SET is classified as read-only and rolled back — session settings should use Config.Timezone/ReadOnly via AfterConnect
+   - Query timeout (queryCtx) covers the entire pipeline including commit — if AfterQuery hooks consume significant time, the remaining budget for commit may be insufficient. This is by design: no write persists unless the full pipeline completes within the timeout. Users should set timeouts that account for both query execution and hook processing
 
 ### Code Comments
 

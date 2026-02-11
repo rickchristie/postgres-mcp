@@ -132,13 +132,16 @@ Create Postgres MCP with Golang.
     - MERGE - blocked by default (`allow_merge: false`). MERGE can perform INSERT, UPDATE, and DELETE operations in a single statement, potentially bypassing individual DML protection rules.
     - GRANT / REVOKE - blocked by default (`allow_grant_revoke: false`). Can modify database permissions and access controls.
     - CREATE ROLE / ALTER ROLE / DROP ROLE - blocked by default (`allow_manage_roles: false`). Includes CREATE USER, DROP USER (syntactic sugar for CREATE/DROP ROLE). Can create/modify/delete database roles and their privileges, including granting SUPERUSER.
-    - CREATE EXTENSION - blocked by default (`allow_create_extension: false`). CREATE EXTENSION can load arbitrary server-side code (C libraries) into the PostgreSQL process. Extremely dangerous — equivalent to arbitrary code execution on the database server.
+    - CREATE EXTENSION / ALTER EXTENSION - blocked by default (`allow_create_extension: false`). CREATE EXTENSION can load arbitrary server-side code (C libraries) into the PostgreSQL process. Extremely dangerous — equivalent to arbitrary code execution on the database server. ALTER EXTENSION can update extensions (loading new code) or add/remove objects from extensions.
     - LOCK TABLE - blocked by default (`allow_lock_table: false`). Explicit LOCK TABLE can acquire exclusive locks, causing deadlocks or denial of service by blocking other queries indefinitely.
     - LISTEN / NOTIFY - blocked by default (`allow_listen_notify: false`). LISTEN/NOTIFY can be used for side-channel communication between sessions. NOTIFY can also send arbitrary payloads to any listening session.
-    - Maintenance commands (VACUUM, ANALYZE, CLUSTER, REINDEX) - blocked by default (`allow_maintenance: false`). These commands can acquire heavy locks (CLUSTER, REINDEX acquire ACCESS EXCLUSIVE), cause significant I/O load, and run for extended periods on large tables.
-    - DDL (CREATE TABLE, ALTER TABLE, CREATE INDEX, CREATE SCHEMA, CREATE VIEW, CREATE SEQUENCE, etc.) - blocked by default (`allow_ddl: false`). Structural DDL changes can lock tables, consume disk space, and modify the database schema unexpectedly. This does NOT cover DROP (separate `allow_drop`), CREATE FUNCTION/PROCEDURE (separate `allow_create_function`), or CREATE EXTENSION (separate `allow_create_extension`).
+    - Maintenance commands (VACUUM, ANALYZE, CLUSTER, REINDEX, REFRESH MATERIALIZED VIEW) - blocked by default (`allow_maintenance: false`). These commands can acquire heavy locks (CLUSTER, REINDEX acquire ACCESS EXCLUSIVE, REFRESH MATERIALIZED VIEW without CONCURRENTLY acquires ACCESS EXCLUSIVE), cause significant I/O load, and run for extended periods on large tables.
+    - DDL (CREATE TABLE, ALTER TABLE, CREATE INDEX, CREATE SCHEMA, CREATE VIEW, CREATE SEQUENCE, etc.) - blocked by default (`allow_ddl: false`). Structural DDL changes can lock tables, consume disk space, and modify the database schema unexpectedly. This does NOT cover DROP (separate `allow_drop`), CREATE FUNCTION/PROCEDURE (separate `allow_create_function`), CREATE EXTENSION/ALTER EXTENSION (separate `allow_create_extension`), CREATE TRIGGER (separate `allow_create_trigger`), or CREATE RULE (separate `allow_create_rule`).
     - DISCARD - blocked by default (`allow_discard: false`). DISCARD ALL/PLANS/SEQUENCES/TEMPORARY resets session state including prepared statements, temporary tables, and cached plans.
     - COMMENT ON - blocked by default (`allow_comment: false`). COMMENT modifies database object metadata. While low-risk, uncontrolled metadata changes can be confusing in shared environments.
+    - CREATE TRIGGER - blocked by default (`allow_create_trigger: false`). Triggers execute arbitrary function calls automatically on every DML operation (INSERT, UPDATE, DELETE, TRUNCATE). A malicious trigger can bypass all protection checks by executing arbitrary SQL through the trigger function, similar to DO blocks and CREATE FUNCTION.
+    - CREATE RULE - blocked by default (`allow_create_rule: false`). Rules rewrite queries at the parser level — a rule can silently transform a SELECT into a DELETE, completely bypassing protection checks. Rules are one of PostgreSQL's most dangerous features for unexpected behavior.
+    - Transaction control statements (BEGIN, COMMIT, ROLLBACK, SAVEPOINT, RELEASE SAVEPOINT, etc.) - always blocked, cannot be toggled. Each query runs in its own managed transaction with AfterQuery hooks running before commit. Allowing raw transaction control would interfere with the pipeline's transaction management and could bypass AfterQuery hook guardrails. This includes prepared transactions (PREPARE TRANSACTION, COMMIT PREPARED, ROLLBACK PREPARED).
     - Multi-statement queries (e.g. `SELECT 1; DROP TABLE users`) - always blocked, cannot be toggled.
     - EXPLAIN / EXPLAIN ANALYZE - always recurses into the inner statement and applies all protection rules. `EXPLAIN ANALYZE` actually executes the query, so `EXPLAIN ANALYZE DELETE FROM users` must be blocked when DELETE without WHERE is blocked. This is not togglable — EXPLAIN always checks its inner statement. Note: PostgreSQL's grammar only allows certain statements inside EXPLAIN (SELECT, INSERT, UPDATE, DELETE, MERGE) — statements like DROP, TRUNCATE, etc. inside EXPLAIN produce parse errors before reaching protection checks.
     - When Read-only mode is on, additionally block:
@@ -225,7 +228,9 @@ Create Postgres MCP with Golang.
       "allow_maintenance": false,
       "allow_ddl": false,
       "allow_discard": false,
-      "allow_comment": false
+      "allow_comment": false,
+      "allow_create_trigger": false,
+      "allow_create_rule": false
     },
     "query": {
       "default_timeout_seconds": 30,
