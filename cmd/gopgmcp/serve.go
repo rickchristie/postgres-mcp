@@ -11,6 +11,7 @@ import (
 
 	pgmcp "github.com/rickchristie/postgres-mcp"
 
+	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/rs/zerolog"
 	"golang.org/x/term"
@@ -23,6 +24,10 @@ func runServe() error {
 	serverConfig, err := loadServerConfig()
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	if serverConfig.Server.Port <= 0 {
+		panic("gopgmcp: server.port must be > 0")
 	}
 
 	// 2. Resolve connection string
@@ -47,9 +52,20 @@ func runServe() error {
 	}
 	defer pgMcp.Close(ctx)
 
-	// 5. Create MCP server
+	// 5. Create MCP server with initialize lifecycle logging
+	hooks := &server.Hooks{}
+	hooks.AddAfterInitialize(func(ctx context.Context, id any, req *mcp.InitializeRequest, result *mcp.InitializeResult) {
+		clientName := req.Params.ClientInfo.Name
+		clientVersion := req.Params.ClientInfo.Version
+		logger.Info().
+			Str("client_name", clientName).
+			Str("client_version", clientVersion).
+			Msg("AI agent connected (MCP initialize)")
+	})
+
 	mcpServer := server.NewMCPServer("gopgmcp", "1.0.0",
 		server.WithToolCapabilities(true),
+		server.WithHooks(hooks),
 	)
 
 	pgmcp.RegisterMCPTools(mcpServer, pgMcp)

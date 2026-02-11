@@ -2855,7 +2855,7 @@ All tests are pure unit tests — no database needed. Default config: all `Allow
 | `TestSQLInjection_UnionBased` | `SELECT * FROM users WHERE id = 1 UNION SELECT * FROM pg_shadow` | default | allowed (single statement, no protection rule against UNION) |
 | `TestSQLInjection_CommentBased` | `SELECT * FROM users -- WHERE admin = true` | default | allowed (single statement, comment is valid SQL) |
 | `TestSQLInjection_MultiStatement` | `SELECT * FROM users; DROP TABLE users` | default | `"multi-statement queries are not allowed: found 2 statements"` |
-| `TestSQLInjection_Stacked` | `SELECT 1; DELETE FROM users; --` | default | `"multi-statement queries are not allowed: found 3 statements"` |
+| `TestSQLInjection_Stacked` | `SELECT 1; DELETE FROM users; --` | default | `"multi-statement queries are not allowed: found 2 statements"` |
 | `TestEmptySQL` | `` (empty string) | default | `"SQL parse error"` |
 | `TestWhitespaceOnlySQL` | `   ` | default | `"SQL parse error"` |
 

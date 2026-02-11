@@ -6,25 +6,29 @@ Comprehensive comparison of the specification against the implemented code. Orga
 
 ## 1. Code / Feature Gaps
 
-### 1.1 `internal/configure` package does not exist
-- **Spec**: Phase 2.6 (line 1047-1069) defines `internal/configure/configure.go` with `Run(configPath string) error` for an interactive config wizard.
-- **Actual**: `cmd/gopgmcp/configure.go` is a stub that prints "not yet implemented". The `internal/configure/` package does not exist.
-- **Severity**: Medium — entire feature missing.
+### ~~1.1 `internal/configure` package does not exist~~
+- ~~**Spec**: Phase 2.6 (line 1047-1069) defines `internal/configure/configure.go` with `Run(configPath string) error` for an interactive config wizard.~~
+- ~~**Actual**: `cmd/gopgmcp/configure.go` is a stub that prints "not yet implemented". The `internal/configure/` package does not exist.~~
+- ~~**Severity**: Medium — entire feature missing.~~
+- **Fixed**: Created `internal/configure/configure.go` with full interactive wizard. Updated `cmd/gopgmcp/configure.go` to call `configure.Run()`.
 
-### 1.2 MCP initialize lifecycle logging not implemented
-- **Spec**: Phase 5.2 (lines 2289-2296) specifies `mcpServer.OnInitialize()` to log AI agent connections with client name/version.
-- **Actual**: `cmd/gopgmcp/serve.go` does not call `OnInitialize` or log MCP initialize requests.
-- **Severity**: Low — logging/observability feature.
+### ~~1.2 MCP initialize lifecycle logging not implemented~~
+- ~~**Spec**: Phase 5.2 (lines 2289-2296) specifies `mcpServer.OnInitialize()` to log AI agent connections with client name/version.~~
+- ~~**Actual**: `cmd/gopgmcp/serve.go` does not call `OnInitialize` or log MCP initialize requests.~~
+- ~~**Severity**: Low — logging/observability feature.~~
+- **Fixed**: Added `hooks.AddAfterInitialize()` in `cmd/gopgmcp/serve.go` to log client name/version on MCP initialize.
 
-### 1.3 Server.Port validation missing in serve.go
-- **Spec**: Section 6.6 (line 2963) specifies `TestLoadConfigValidation_NoPort` — server.port must be > 0, server should panic if missing.
-- **Actual**: `serve.go` uses `fmt.Sprintf(":%d", serverConfig.Server.Port)` without validating port > 0. Zero port would bind to a random port instead of panicking.
-- **Severity**: Low — config validation gap.
+### ~~1.3 Server.Port validation missing in serve.go~~
+- ~~**Spec**: Section 6.6 (line 2963) specifies `TestLoadConfigValidation_NoPort` — server.port must be > 0, server should panic if missing.~~
+- ~~**Actual**: `serve.go` uses `fmt.Sprintf(":%d", serverConfig.Server.Port)` without validating port > 0. Zero port would bind to a random port instead of panicking.~~
+- ~~**Severity**: Low — config validation gap.~~
+- **Fixed**: Added `panic("gopgmcp: server.port must be > 0")` validation in `cmd/gopgmcp/serve.go`.
 
-### 1.4 Spec bug: `TestSQLInjection_Stacked` expects wrong statement count
-- **Spec**: Section 6.1 (line 2858) says `SELECT 1; DELETE FROM users; --` should produce "found 3 statements".
-- **Actual**: pg_query parses this as 2 statements (trailing `; --` is a comment). Actual test correctly asserts "found 2 statements".
-- **Action**: Fix the spec, not the code.
+### ~~1.4 Spec bug: `TestSQLInjection_Stacked` expects wrong statement count~~
+- ~~**Spec**: Section 6.1 (line 2858) says `SELECT 1; DELETE FROM users; --` should produce "found 3 statements".~~
+- ~~**Actual**: pg_query parses this as 2 statements (trailing `; --` is a comment). Actual test correctly asserts "found 2 statements".~~
+- ~~**Action**: Fix the spec, not the code.~~
+- **Fixed**: Updated IMPLEMENTATION.md line 2858 to say "found 2 statements".
 
 ---
 

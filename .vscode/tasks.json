@@ -35,6 +35,25 @@
         "focus": true
       },
       "problemMatcher": ["$go"]
+    },
+    {
+      "label": "Build CLI",
+      "type": "shell",
+      "command": "go",
+      "args": ["build", "-o", "${workspaceFolder}/gopgmcp", "./cmd/gopgmcp"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "focus": true
+      },
+      "problemMatcher": ["$go"]
     }
   ]
 }

@@ -1,9 +1,16 @@
 package main
 
-import "fmt"
+import (
+	"flag"
+	"os"
+
+	"github.com/rickchristie/postgres-mcp/internal/configure"
+)
 
 func runConfigure() error {
-	fmt.Println("Interactive configuration wizard is not yet implemented.")
-	fmt.Println("Please create a config file manually at .gopgmcp/config.json")
-	return nil
+	fs := flag.NewFlagSet("configure", flag.ExitOnError)
+	configPath := fs.String("config", ".gopgmcp/config.json", "Path to configuration file")
+	fs.Parse(os.Args[2:])
+
+	return configure.Run(*configPath)
 }

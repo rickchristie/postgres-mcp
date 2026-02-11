@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"os"
+
+	"github.com/rickchristie/postgres-mcp/internal/meta"
 )
 
 func main() {
@@ -22,6 +24,8 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
+	case "--version", "-v", "version":
+		fmt.Printf("gopgmcp %s\n", meta.Version)
 	case "--help", "-h", "help":
 		printUsage()
 	default:
@@ -32,10 +36,11 @@ func main() {
 }
 
 func printUsage() {
-	fmt.Println("gopgmcp — PostgreSQL MCP Server")
+	fmt.Printf("gopgmcp %s — PostgreSQL MCP Server\n", meta.Version)
 	fmt.Println()
 	fmt.Println("Usage:")
 	fmt.Println("  gopgmcp serve       Start the MCP server")
 	fmt.Println("  gopgmcp configure   Run interactive configuration wizard")
+	fmt.Println("  gopgmcp --version   Show version")
 	fmt.Println("  gopgmcp --help      Show this help message")
 }
