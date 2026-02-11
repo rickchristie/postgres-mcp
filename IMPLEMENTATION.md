@@ -125,10 +125,9 @@ type Config struct {
     ReadOnly                 bool               `json:"read_only"`
     Timezone                 string             `json:"timezone"`
     DefaultHookTimeoutSeconds int               `json:"default_hook_timeout_seconds"`
-    ServerHooks              ServerHooksConfig  `json:"server_hooks"`
 
     // Library mode: Go function hooks (json:"-", not serializable).
-    // Mutually exclusive with ServerHooks — if Go hooks are set, ServerHooksConfig is ignored.
+    // Mutually exclusive with ServerConfig.ServerHooks — if Go hooks are set, command hooks must not be configured.
     BeforeQueryHooks []BeforeQueryHookEntry `json:"-"`
     AfterQueryHooks  []AfterQueryHookEntry  `json:"-"`
 }
@@ -136,9 +135,10 @@ type Config struct {
 // ServerConfig embeds Config and adds server-only fields for CLI mode.
 type ServerConfig struct {
     Config
-    Connection ConnectionConfig `json:"connection"`
-    Server     ServerSettings   `json:"server"`
-    Logging    LoggingConfig    `json:"logging"`
+    Connection  ConnectionConfig  `json:"connection"`
+    Server      ServerSettings    `json:"server"`
+    Logging     LoggingConfig     `json:"logging"`
+    ServerHooks ServerHooksConfig `json:"server_hooks"`
 }
 
 type ConnectionConfig struct {
@@ -183,12 +183,20 @@ type ProtectionConfig struct {
     AllowMerge              bool `json:"allow_merge"`
     AllowGrantRevoke        bool `json:"allow_grant_revoke"`
     AllowManageRoles        bool `json:"allow_manage_roles"`
+    AllowCreateExtension    bool `json:"allow_create_extension"`
+    AllowLockTable          bool `json:"allow_lock_table"`
+    AllowListenNotify       bool `json:"allow_listen_notify"`
+    AllowMaintenance        bool `json:"allow_maintenance"`
+    AllowDDL                bool `json:"allow_ddl"`
+    AllowDiscard            bool `json:"allow_discard"`
+    AllowComment            bool `json:"allow_comment"`
 }
 
 type QueryConfig struct {
     DefaultTimeoutSeconds        int            `json:"default_timeout_seconds"`
     ListTablesTimeoutSeconds     int            `json:"list_tables_timeout_seconds"`
     DescribeTableTimeoutSeconds  int            `json:"describe_table_timeout_seconds"`
+    MaxSQLLength                 int            `json:"max_sql_length"`
     MaxResultLength              int            `json:"max_result_length"`
     TimeoutRules                 []TimeoutRule  `json:"timeout_rules"`
 }
@@ -224,8 +232,8 @@ type HookEntry struct {
 // --- Library mode hook interfaces ---
 // These are used when consumers embed pgmcp as a Go library.
 // They avoid JSON serialization and work with native Go types.
-// Library hooks and command hooks are mutually exclusive —
-// if Go hooks are set, ServerHooksConfig is ignored.
+// Library hooks and command hooks (via WithServerHooks option) are mutually exclusive —
+// if Go hooks are set, command hooks must not be configured.
 
 // BeforeQueryHook can inspect and modify queries before execution.
 type BeforeQueryHook interface {
@@ -257,7 +265,7 @@ type AfterQueryHookEntry struct {
 }
 ```
 
-The `Config` struct includes both command-based and Go hook fields (see definition above — `ServerHooks` for CLI command hooks, `BeforeQueryHooks`/`AfterQueryHooks` for library mode Go hooks, mutually exclusive).
+The `Config` struct includes Go hook fields (`BeforeQueryHooks`/`AfterQueryHooks`) for library mode. Command-based hooks (`ServerHooks`) are in `ServerConfig` only — the CLI extracts `ServerConfig.ServerHooks` and passes it to the hook runner separately. Go hooks and command hooks are mutually exclusive.
 
 **Config loading logic** (internal to `pgmcp.go` or `cmd/`):
 1. Check `GOPGMCP_CONFIG_PATH` env var → use that path
@@ -268,6 +276,7 @@ The `Config` struct includes both command-based and Go hook fields (see definiti
 
 **Config defaults** (applied before validation, when fields are zero-value):
 - `protection.*` → all `false` (Go zero-value = blocked, safe default; set to `true` to allow specific operations)
+- `query.max_sql_length` → `100000` (when 0; prevents excessively large SQL from consuming memory)
 - `query.max_result_length` → `100000` (when 0; cannot be disabled — there is no "no limit" option)
 
 **Config validation (base Config, runs in `New()`)** — panics on failure:
@@ -275,6 +284,7 @@ The `Config` struct includes both command-based and Go hook fields (see definiti
 - `query.default_timeout_seconds` must be > 0 — no default, user must explicitly set this
 - `query.list_tables_timeout_seconds` must be > 0 — no default, user must explicitly set this
 - `query.describe_table_timeout_seconds` must be > 0 — no default, user must explicitly set this
+- `query.max_sql_length` must be > 0 (guaranteed after defaults, but explicit validation for safety)
 - `query.max_result_length` must be > 0 (guaranteed after defaults, but explicit validation for safety)
 - `default_hook_timeout_seconds` must be > 0 if any hooks are configured (server_hooks or Go hooks) — no default, user must explicitly set this
 - All regex patterns must compile successfully
@@ -283,6 +293,8 @@ The `Config` struct includes both command-based and Go hook fields (see definiti
 **ServerConfig validation (additional, runs in CLI mode only)** — panics on failure:
 - `server.port` must be specified and > 0
 - `server.health_check_path` must be non-empty if `server.health_check_enabled` is true — no default, user must explicitly set this
+- If both Go hooks (`Config.BeforeQueryHooks`/`Config.AfterQueryHooks`) and command hooks (`ServerConfig.ServerHooks.BeforeQuery`/`ServerConfig.ServerHooks.AfterQuery`) are configured, panic — they are mutually exclusive
+- `config.DefaultHookTimeoutSeconds` must be > 0 if any command hooks are configured in `ServerConfig.ServerHooks`
 
 **Config validation panics intentionally.** Both CLI and library mode initialize at application startup. Missing/invalid config should crash immediately rather than produce subtle runtime failures. Library users call `New()` during initialization, so panics are caught at startup. This philosophy applies to all validation across the entire codebase: `New()` validates all config fields relevant to the library API before proceeding, and all internal package constructors (`hooks.NewRunner`, `sanitize.NewSanitizer`, `errprompt.NewMatcher`, `timeout.NewManager`) panic on invalid config (e.g., invalid regex patterns). None of these constructors return errors for configuration issues — config problems are always panics. Only runtime failures (e.g., cannot connect to database) return errors.
 
@@ -316,6 +328,13 @@ type Config struct {
     AllowMerge              bool
     AllowGrantRevoke        bool
     AllowManageRoles        bool
+    AllowCreateExtension    bool
+    AllowLockTable          bool
+    AllowListenNotify       bool
+    AllowMaintenance        bool
+    AllowDDL                bool
+    AllowDiscard            bool
+    AllowComment            bool
     ReadOnly                bool
 }
 
@@ -514,6 +533,102 @@ func (c *Checker) checkNode(node *pg_query.Node) error {
     case *pg_query.Node_DropRoleStmt:
         if !c.config.AllowManageRoles {
             return fmt.Errorf("DROP ROLE/USER is not allowed: can delete database roles")
+        }
+
+    case *pg_query.Node_CreateExtensionStmt:
+        if !c.config.AllowCreateExtension {
+            return fmt.Errorf("CREATE EXTENSION is not allowed: can load arbitrary server-side code into PostgreSQL")
+        }
+
+    case *pg_query.Node_LockStmt:
+        if !c.config.AllowLockTable {
+            return fmt.Errorf("LOCK TABLE is not allowed: can acquire exclusive locks causing deadlocks or denial of service")
+        }
+
+    case *pg_query.Node_ListenStmt:
+        if !c.config.AllowListenNotify {
+            return fmt.Errorf("LISTEN is not allowed: can be used for side-channel communication between sessions")
+        }
+
+    case *pg_query.Node_NotifyStmt:
+        if !c.config.AllowListenNotify {
+            return fmt.Errorf("NOTIFY is not allowed: can send arbitrary payloads to listening sessions")
+        }
+
+    case *pg_query.Node_VacuumStmt:
+        // Covers both VACUUM and standalone ANALYZE (they share the same AST node in PostgreSQL).
+        if !c.config.AllowMaintenance {
+            return fmt.Errorf("VACUUM/ANALYZE is not allowed: maintenance commands can acquire heavy locks and cause significant I/O load")
+        }
+
+    case *pg_query.Node_ClusterStmt:
+        if !c.config.AllowMaintenance {
+            return fmt.Errorf("CLUSTER is not allowed: acquires ACCESS EXCLUSIVE lock and rewrites the entire table")
+        }
+
+    case *pg_query.Node_ReindexStmt:
+        if !c.config.AllowMaintenance {
+            return fmt.Errorf("REINDEX is not allowed: can acquire ACCESS EXCLUSIVE lock on tables and indexes")
+        }
+
+    case *pg_query.Node_CreateStmt:
+        // CREATE TABLE
+        if !c.config.AllowDDL {
+            return fmt.Errorf("CREATE TABLE is not allowed: DDL operations are blocked")
+        }
+
+    case *pg_query.Node_AlterTableStmt:
+        if !c.config.AllowDDL {
+            return fmt.Errorf("ALTER TABLE is not allowed: DDL operations are blocked")
+        }
+
+    case *pg_query.Node_IndexStmt:
+        // CREATE INDEX
+        if !c.config.AllowDDL {
+            return fmt.Errorf("CREATE INDEX is not allowed: DDL operations are blocked")
+        }
+
+    case *pg_query.Node_CreateSchemaStmt:
+        if !c.config.AllowDDL {
+            return fmt.Errorf("CREATE SCHEMA is not allowed: DDL operations are blocked")
+        }
+
+    case *pg_query.Node_ViewStmt:
+        // CREATE VIEW / CREATE OR REPLACE VIEW
+        if !c.config.AllowDDL {
+            return fmt.Errorf("CREATE VIEW is not allowed: DDL operations are blocked")
+        }
+
+    case *pg_query.Node_CreateSeqStmt:
+        if !c.config.AllowDDL {
+            return fmt.Errorf("CREATE SEQUENCE is not allowed: DDL operations are blocked")
+        }
+
+    case *pg_query.Node_CreateTableAsStmt:
+        // CREATE TABLE ... AS SELECT / CREATE MATERIALIZED VIEW
+        if !c.config.AllowDDL {
+            return fmt.Errorf("CREATE TABLE AS / CREATE MATERIALIZED VIEW is not allowed: DDL operations are blocked")
+        }
+
+    case *pg_query.Node_AlterSeqStmt:
+        if !c.config.AllowDDL {
+            return fmt.Errorf("ALTER SEQUENCE is not allowed: DDL operations are blocked")
+        }
+
+    case *pg_query.Node_RenameStmt:
+        // ALTER ... RENAME TO (tables, columns, indexes, etc.)
+        if !c.config.AllowDDL {
+            return fmt.Errorf("RENAME is not allowed: DDL operations are blocked")
+        }
+
+    case *pg_query.Node_DiscardStmt:
+        if !c.config.AllowDiscard {
+            return fmt.Errorf("DISCARD is not allowed: resets session state including prepared statements and temporary tables")
+        }
+
+    case *pg_query.Node_CommentStmt:
+        if !c.config.AllowComment {
+            return fmt.Errorf("COMMENT ON is not allowed: modifies database object metadata")
         }
 
     case *pg_query.Node_TransactionStmt:
@@ -930,7 +1045,7 @@ type PostgresMcp struct {
     pool       *pgxpool.Pool
     semaphore  chan struct{}
     protection *protection.Checker
-    cmdHooks   *hooks.Runner          // command-based hooks (CLI mode, from ServerHooksConfig)
+    cmdHooks   *hooks.Runner          // command-based hooks (CLI mode, passed separately from ServerConfig.ServerHooks)
     goBeforeHooks []BeforeQueryHookEntry // Go function hooks (library mode)
     goAfterHooks  []AfterQueryHookEntry  // Go function hooks (library mode)
     sanitizer  *sanitize.Sanitizer
@@ -943,8 +1058,24 @@ type PostgresMcp struct {
 // connString is the PostgreSQL connection string (must include credentials).
 // In library mode, connString is required — Config.Connection fields are ignored
 // (the CLI is responsible for building connString from Config.Connection + prompted credentials).
+// opts allows passing optional configuration such as command-based hooks (CLI mode).
 // Panics on invalid config. Returns error only for runtime failures (e.g., pool creation).
-func New(ctx context.Context, connString string, config Config, logger zerolog.Logger) (*PostgresMcp, error)
+func New(ctx context.Context, connString string, config Config, logger zerolog.Logger, opts ...Option) (*PostgresMcp, error)
+
+// Option is a functional option for New().
+type Option func(*options)
+
+type options struct {
+    serverHooks *ServerHooksConfig // command-based hooks, passed by CLI from ServerConfig.ServerHooks
+}
+
+// WithServerHooks passes command-based hook configuration to PostgresMcp.
+// Mutually exclusive with Config.BeforeQueryHooks/AfterQueryHooks (Go hooks).
+func WithServerHooks(hooks ServerHooksConfig) Option {
+    return func(o *options) {
+        o.serverHooks = &hooks
+    }
+}
 
 // Close closes the connection pool. Accepts context for controlled shutdown.
 func (p *PostgresMcp) Close(ctx context.Context)
@@ -963,11 +1094,11 @@ Each query execution creates its own data (rows, maps) and the sanitizer operate
    - `config.Query.DefaultTimeoutSeconds` must be > 0 — no default, user must explicitly set this
    - `config.Query.ListTablesTimeoutSeconds` must be > 0 — no default, user must explicitly set this
    - `config.Query.DescribeTableTimeoutSeconds` must be > 0 — no default, user must explicitly set this
+   - `config.Query.MaxSQLLength` defaults to 100000 if 0; must be > 0 after default
    - `config.Query.MaxResultLength` defaults to 100000 if 0; must be > 0 after default
-   - `config.DefaultHookTimeoutSeconds` must be > 0 if any hooks are configured (command-based OR Go hooks) — no default, user must explicitly set this
+   - `config.DefaultHookTimeoutSeconds` must be > 0 if any hooks are configured (Go hooks) — no default, user must explicitly set this
    - All per-hook and per-rule `TimeoutSeconds` must be > 0
    - All regex patterns validated by internal constructors (they panic on invalid regex)
-   - If both Go hooks (`BeforeQueryHooks`/`AfterQueryHooks`) and command hooks (`ServerHooks.BeforeQuery`/`ServerHooks.AfterQuery`) are configured, panic — they are mutually exclusive
 2. Configure `pgxpool.Config`: apply pool settings, set `DefaultQueryExecMode` to `pgx.QueryExecModeExec`.
 3. Set `AfterConnect` hook on pool config to run session-level SET commands on each new connection:
    - If `config.ReadOnly`: run `SET default_transaction_read_only = on`.
@@ -976,9 +1107,9 @@ Each query execution creates its own data (rows, maps) and the sanitizer operate
 4. Create `pgxpool.Pool` (returns error on connection failure — this is a runtime error, not a config error).
 5. Create semaphore: `make(chan struct{}, config.Pool.MaxConns)` — bounds concurrent query pipelines.
 6. Initialize all internal components, mapping pgmcp config types to internal package config types:
-   - `protection.NewChecker(protection.Config{AllowSet: config.Protection.AllowSet, ..., AllowCopyFrom: config.Protection.AllowCopyFrom, AllowCopyTo: config.Protection.AllowCopyTo, AllowCreateFunction: config.Protection.AllowCreateFunction, AllowPrepare: config.Protection.AllowPrepare, AllowAlterSystem: config.Protection.AllowAlterSystem, AllowMerge: config.Protection.AllowMerge, AllowGrantRevoke: config.Protection.AllowGrantRevoke, AllowManageRoles: config.Protection.AllowManageRoles, ..., ReadOnly: config.ReadOnly})`
+   - `protection.NewChecker(protection.Config{AllowSet: config.Protection.AllowSet, ..., AllowCopyFrom: config.Protection.AllowCopyFrom, AllowCopyTo: config.Protection.AllowCopyTo, AllowCreateFunction: config.Protection.AllowCreateFunction, AllowPrepare: config.Protection.AllowPrepare, AllowAlterSystem: config.Protection.AllowAlterSystem, AllowMerge: config.Protection.AllowMerge, AllowGrantRevoke: config.Protection.AllowGrantRevoke, AllowManageRoles: config.Protection.AllowManageRoles, AllowCreateExtension: config.Protection.AllowCreateExtension, AllowLockTable: config.Protection.AllowLockTable, AllowListenNotify: config.Protection.AllowListenNotify, AllowMaintenance: config.Protection.AllowMaintenance, AllowDDL: config.Protection.AllowDDL, AllowDiscard: config.Protection.AllowDiscard, AllowComment: config.Protection.AllowComment, ReadOnly: config.ReadOnly})`
    - If Go hooks are configured (library mode): store `config.BeforeQueryHooks` and `config.AfterQueryHooks` directly on the struct. No Runner needed.
-   - If command hooks are configured (CLI mode): `hooks.NewRunner(hooks.Config{DefaultTimeout: time.Duration(config.DefaultHookTimeoutSeconds) * time.Second, ...}, logger)`
+   - If command hooks are configured (via `WithServerHooks` option): `hooks.NewRunner(hooks.Config{DefaultTimeout: time.Duration(config.DefaultHookTimeoutSeconds) * time.Second, ...}, logger)`. Panics if Go hooks are also configured (mutually exclusive).
    - If no hooks: `cmdHooks` is nil, Go hook slices are nil.
    - `sanitize.NewSanitizer(mapSanitizationRules(config.Sanitization))`
    - `errprompt.NewMatcher(mapErrorPromptRules(config.ErrorPrompts))`
@@ -1013,6 +1144,7 @@ func (p *PostgresMcp) Query(ctx context.Context, input QueryInput) *QueryOutput
 
 ```go
 func (p *PostgresMcp) Query(ctx context.Context, input QueryInput) *QueryOutput {
+    startTime := time.Now()
     sql := input.SQL
 
     // 1. Acquire semaphore (respects context cancellation to prevent deadlock)
@@ -1023,7 +1155,12 @@ func (p *PostgresMcp) Query(ctx context.Context, input QueryInput) *QueryOutput 
     }
     defer func() { <-p.semaphore }()
 
-    // 2. Run BeforeQuery hooks (middleware chain)
+    // 2. Check SQL length (before any processing — parsing, hooks, protection)
+    if len(sql) > p.config.Query.MaxSQLLength {
+        return p.handleError(fmt.Errorf("SQL query too long: %d bytes exceeds maximum of %d bytes", len(sql), p.config.Query.MaxSQLLength))
+    }
+
+    // 3. Run BeforeQuery hooks (middleware chain)
     var err error
     if len(p.goBeforeHooks) > 0 {
         sql, err = p.runGoBeforeHooks(ctx, sql)
@@ -1034,17 +1171,17 @@ func (p *PostgresMcp) Query(ctx context.Context, input QueryInput) *QueryOutput 
         return p.handleError(err)
     }
 
-    // 3. Protection check (on potentially modified query)
+    // 4. Protection check (on potentially modified query)
     if err := p.protection.Check(sql); err != nil {
         return p.handleError(err)
     }
 
-    // 4. Determine timeout
+    // 5. Determine timeout
     timeout := p.timeoutMgr.GetTimeout(sql)
     queryCtx, cancel := context.WithTimeout(ctx, timeout)
     defer cancel()
 
-    // 5. Acquire connection and execute in transaction
+    // 6. Acquire connection and execute in transaction
     conn, err := p.pool.Acquire(queryCtx)
     if err != nil {
         return p.handleError(err)
@@ -1062,25 +1199,25 @@ func (p *PostgresMcp) Query(ctx context.Context, input QueryInput) *QueryOutput 
         return p.handleError(err)
     }
 
-    // 6. Collect results
+    // 7. Collect results
     result, err := p.collectRows(rows)
     if err != nil {
         return p.handleError(err)
     }
 
-    // 7. Detect read-only vs write statement from the parsed AST.
+    // 8. Detect read-only vs write statement from the parsed AST.
     // Since we enforce single-statement and have the parsed AST from protection check,
     // we can determine whether this is a read-only query (SELECT, EXPLAIN) or a write
     // (INSERT/UPDATE/DELETE/MERGE/etc.).
     isReadOnly := p.isReadOnlyStatement(sql)
 
-    // 8. For read-only queries, rollback immediately (no commit needed).
+    // 9. For read-only queries, rollback immediately (no commit needed).
     // This frees the transaction before running AfterQuery hooks.
     if isReadOnly {
         tx.Rollback(ctx) // explicit rollback for clarity, deferred rollback is no-op after this
     }
 
-    // 9. AfterQuery hooks — run BEFORE commit for write queries.
+    // 10. AfterQuery hooks — run BEFORE commit for write queries.
     // This allows hooks to reject and trigger rollback for writes
     // (e.g., force-rollback if too many rows affected).
     var finalResult *QueryOutput
@@ -1116,7 +1253,7 @@ func (p *PostgresMcp) Query(ctx context.Context, input QueryInput) *QueryOutput 
         finalResult = result
     }
 
-    // 10. For write queries, commit AFTER hooks have approved the result.
+    // 11. For write queries, commit AFTER hooks have approved the result.
     // If we reach here, all AfterQuery hooks accepted. Deferred tx.Rollback() is no-op after commit.
     if !isReadOnly {
         if err := tx.Commit(queryCtx); err != nil {
@@ -1124,14 +1261,22 @@ func (p *PostgresMcp) Query(ctx context.Context, input QueryInput) *QueryOutput 
         }
     }
 
-    // 11. Apply sanitization (per-field, recursive into JSONB/arrays)
+    // 12. Apply sanitization (per-field, recursive into JSONB/arrays)
     finalResult.Rows = p.sanitizer.SanitizeRows(finalResult.Rows)
 
     // FIXME: Performance optimization — truncateIfNeeded calls json.Marshal(output.Rows)
     // just to measure length. The MCP server will marshal the same data again when sending
     // the response. Consider tracking result size during collectRows instead.
-    // 12. Apply max result length truncation (keeps partial data — may be garbled JSON but still useful for agents)
+    // 13. Apply max result length truncation (keeps partial data — may be garbled JSON but still useful for agents)
     p.truncateIfNeeded(finalResult)
+
+    // 14. Log successful query execution
+    p.logger.Info().
+        Str("sql", truncateForLog(sql, 200)).
+        Dur("duration", time.Since(startTime)).
+        Int("row_count", len(finalResult.Rows)).
+        Int64("rows_affected", finalResult.RowsAffected).
+        Msg("query executed")
 
     return finalResult
 }
@@ -1158,7 +1303,11 @@ func (p *PostgresMcp) isReadOnlyStatement(sql string) bool {
     case *pg_query.Node_ExplainStmt:
         return true
     case *pg_query.Node_VariableSetStmt:
-        return true // SET/RESET
+        return true // SET/RESET — classified as read-only, so the transaction is rolled back.
+        // This means SET commands through the Query tool have no lasting effect on the session,
+        // because PostgreSQL undoes SET within a rolled-back transaction. This is intentional:
+        // session-level settings should be configured via Config.Timezone / Config.ReadOnly
+        // (applied in AfterConnect), not via ad-hoc SET through the query tool.
     case *pg_query.Node_VariableShowStmt:
         return true // SHOW
     default:
@@ -1233,7 +1382,7 @@ func (p *PostgresMcp) collectRows(rows pgx.Rows) (*QueryOutput, error) {
         columns[i] = fd.Name
     }
 
-    var resultRows []map[string]interface{}
+    resultRows := make([]map[string]interface{}, 0)
     for rows.Next() {
         values, err := rows.Values()
         if err != nil {
@@ -1619,6 +1768,16 @@ The actual Go types returned by `rows.Values()` with `QueryExecModeExec` have be
 - `float32`/`float64` NaN/+Inf/-Inf from Postgres real/double precision columns break `json.Marshal` — must convert to string representations.
 - `pgtype.Numeric` Infinity values panic in `MarshalJSON()` — must check `InfinityModifier` before calling it.
 
+**truncateForLog helper** — truncates SQL for log output to avoid oversized log entries:
+```go
+func truncateForLog(s string, maxLen int) string {
+    if len(s) <= maxLen {
+        return s
+    }
+    return s[:maxLen] + "...[truncated]"
+}
+```
+
 **handleError logic:**
 ```go
 // handleError converts any error into a QueryOutput with error message.
@@ -1695,6 +1854,8 @@ func (p *PostgresMcp) ListTables(ctx context.Context, input ListTablesInput) (*L
 
 ```go
 func (p *PostgresMcp) ListTables(ctx context.Context, input ListTablesInput) (*ListTablesOutput, error) {
+    startTime := time.Now()
+
     // 1. Acquire semaphore (same as Query — bounds total concurrent operations to pool size)
     select {
     case p.semaphore <- struct{}{}:
@@ -1716,6 +1877,13 @@ func (p *PostgresMcp) ListTables(ctx context.Context, input ListTablesInput) (*L
 
     rows, err := conn.Query(queryCtx, listTablesSQL)
     // ... scan rows ...
+
+    p.logger.Info().
+        Dur("duration", time.Since(startTime)).
+        Int("table_count", len(output.Tables)).
+        Msg("ListTables executed")
+
+    return output, nil
 }
 ```
 
@@ -1814,6 +1982,8 @@ func (p *PostgresMcp) DescribeTable(ctx context.Context, input DescribeTableInpu
 
 ```go
 func (p *PostgresMcp) DescribeTable(ctx context.Context, input DescribeTableInput) (*DescribeTableOutput, error) {
+    startTime := time.Now()
+
     // Default schema to "public" when not specified.
     schema := input.Schema
     if schema == "" {
@@ -1854,6 +2024,16 @@ func (p *PostgresMcp) DescribeTable(ctx context.Context, input DescribeTableInpu
 
     // ... run multiple pg_catalog queries using tx (not conn) with qualName for $1::regclass
     // and separate schema/table parameters for information_schema queries ...
+
+    p.logger.Info().
+        Str("schema", schema).
+        Str("table", input.Table).
+        Dur("duration", time.Since(startTime)).
+        Str("type", output.Type).
+        Int("column_count", len(output.Columns)).
+        Msg("DescribeTable executed")
+
+    return output, nil
 }
 
 // quoteIdent escapes a SQL identifier for safe use in $1::regclass.
@@ -2032,14 +2212,33 @@ func runServe() error {
     // 3. Setup logger (zerolog)
     logger := setupLogger(serverConfig.Logging)
 
-    // 4. Create PostgresMcp instance — extract embedded Config from ServerConfig
-    pgMcp, err := pgmcp.New(ctx, connString, serverConfig.Config, logger)
+    // 4. Create PostgresMcp instance — extract embedded Config from ServerConfig.
+    // Pass server hooks via WithServerHooks option (CLI-only, not in base Config).
+    var opts []pgmcp.Option
+    if len(serverConfig.ServerHooks.BeforeQuery) > 0 || len(serverConfig.ServerHooks.AfterQuery) > 0 {
+        opts = append(opts, pgmcp.WithServerHooks(serverConfig.ServerHooks))
+    }
+    pgMcp, err := pgmcp.New(ctx, connString, serverConfig.Config, logger, opts...)
     defer pgMcp.Close(ctx)
 
-    // 5. Create MCP server
+    // 5. Create MCP server with session lifecycle logging.
+    // Log when AI agents connect (initialize) and disconnect.
     mcpServer := server.NewMCPServer("gopgmcp", "1.0.0",
         server.WithToolCapabilities(true),
     )
+
+    // Register session lifecycle hooks for logging.
+    // mcp-go calls these on initialize (client connects) and session close (client disconnects).
+    // In stateless mode, each initialize call is independent — log each one.
+    mcpServer.OnInitialize(func(ctx context.Context, req *mcp.InitializeRequest) {
+        clientName := req.Params.ClientInfo.Name
+        clientVersion := req.Params.ClientInfo.Version
+        logger.Info().
+            Str("client_name", clientName).
+            Str("client_version", clientVersion).
+            Msg("AI agent connected (MCP initialize)")
+    })
+
     pgmcp.RegisterMCPTools(mcpServer, pgMcp)
 
     // 6. Start HTTP server
@@ -2414,6 +2613,83 @@ All tests are pure unit tests — no database needed. Default config: all `Allow
 | `TestAlterRole_Allowed` | `ALTER ROLE testrole WITH SUPERUSER` | AllowManageRoles=true | allowed |
 | `TestDropRole_Allowed` | `DROP ROLE testrole` | AllowManageRoles=true | allowed |
 
+#### CREATE EXTENSION Protection
+
+| Test | SQL | Config | Expected Error Contains |
+|---|---|---|---|
+| `TestCreateExtension_Basic` | `CREATE EXTENSION pg_trgm` | default | `"CREATE EXTENSION is not allowed: can load arbitrary server-side code into PostgreSQL"` |
+| `TestCreateExtension_IfNotExists` | `CREATE EXTENSION IF NOT EXISTS pgcrypto` | default | `"CREATE EXTENSION is not allowed"` |
+| `TestCreateExtension_Allowed` | `CREATE EXTENSION pg_trgm` | AllowCreateExtension=true | allowed |
+
+#### LOCK TABLE Protection
+
+| Test | SQL | Config | Expected Error Contains |
+|---|---|---|---|
+| `TestLockTable_Basic` | `LOCK TABLE users` | default | `"LOCK TABLE is not allowed: can acquire exclusive locks causing deadlocks or denial of service"` |
+| `TestLockTable_ExclusiveMode` | `LOCK TABLE users IN EXCLUSIVE MODE` | default | `"LOCK TABLE is not allowed"` |
+| `TestLockTable_Allowed` | `LOCK TABLE users` | AllowLockTable=true | allowed |
+
+#### LISTEN / NOTIFY Protection
+
+| Test | SQL | Config | Expected Error Contains |
+|---|---|---|---|
+| `TestListen_Basic` | `LISTEN my_channel` | default | `"LISTEN is not allowed: can be used for side-channel communication between sessions"` |
+| `TestNotify_Basic` | `NOTIFY my_channel, 'hello'` | default | `"NOTIFY is not allowed: can send arbitrary payloads to listening sessions"` |
+| `TestNotify_NoPayload` | `NOTIFY my_channel` | default | `"NOTIFY is not allowed"` |
+| `TestListen_Allowed` | `LISTEN my_channel` | AllowListenNotify=true | allowed |
+| `TestNotify_Allowed` | `NOTIFY my_channel, 'hello'` | AllowListenNotify=true | allowed |
+
+#### Maintenance Command Protection (VACUUM, ANALYZE, CLUSTER, REINDEX)
+
+| Test | SQL | Config | Expected Error Contains |
+|---|---|---|---|
+| `TestVacuum_Basic` | `VACUUM users` | default | `"VACUUM/ANALYZE is not allowed: maintenance commands can acquire heavy locks and cause significant I/O load"` |
+| `TestVacuum_Full` | `VACUUM FULL users` | default | `"VACUUM/ANALYZE is not allowed"` |
+| `TestVacuum_Analyze` | `VACUUM ANALYZE users` | default | `"VACUUM/ANALYZE is not allowed"` |
+| `TestAnalyze_Standalone` | `ANALYZE users` | default | `"VACUUM/ANALYZE is not allowed"` |
+| `TestCluster_Basic` | `CLUSTER users USING users_pkey` | default | `"CLUSTER is not allowed: acquires ACCESS EXCLUSIVE lock and rewrites the entire table"` |
+| `TestReindex_Basic` | `REINDEX TABLE users` | default | `"REINDEX is not allowed: can acquire ACCESS EXCLUSIVE lock on tables and indexes"` |
+| `TestReindex_Index` | `REINDEX INDEX users_pkey` | default | `"REINDEX is not allowed"` |
+| `TestVacuum_Allowed` | `VACUUM users` | AllowMaintenance=true | allowed |
+| `TestAnalyze_Allowed` | `ANALYZE users` | AllowMaintenance=true | allowed |
+| `TestCluster_Allowed` | `CLUSTER users USING users_pkey` | AllowMaintenance=true | allowed |
+| `TestReindex_Allowed` | `REINDEX TABLE users` | AllowMaintenance=true | allowed |
+
+#### DDL Protection (CREATE TABLE, ALTER TABLE, CREATE INDEX, etc.)
+
+| Test | SQL | Config | Expected Error Contains |
+|---|---|---|---|
+| `TestDDL_CreateTable` | `CREATE TABLE test (id int)` | default | `"CREATE TABLE is not allowed: DDL operations are blocked"` |
+| `TestDDL_AlterTable` | `ALTER TABLE users ADD COLUMN email text` | default | `"ALTER TABLE is not allowed: DDL operations are blocked"` |
+| `TestDDL_CreateIndex` | `CREATE INDEX idx_name ON users (name)` | default | `"CREATE INDEX is not allowed: DDL operations are blocked"` |
+| `TestDDL_CreateSchema` | `CREATE SCHEMA myschema` | default | `"CREATE SCHEMA is not allowed: DDL operations are blocked"` |
+| `TestDDL_CreateView` | `CREATE VIEW active_users AS SELECT * FROM users WHERE active = true` | default | `"CREATE VIEW is not allowed: DDL operations are blocked"` |
+| `TestDDL_CreateSequence` | `CREATE SEQUENCE user_id_seq` | default | `"CREATE SEQUENCE is not allowed: DDL operations are blocked"` |
+| `TestDDL_CreateTableAs` | `CREATE TABLE summary AS SELECT COUNT(*) FROM users` | default | `"CREATE TABLE AS / CREATE MATERIALIZED VIEW is not allowed: DDL operations are blocked"` |
+| `TestDDL_AlterSequence` | `ALTER SEQUENCE user_id_seq RESTART WITH 100` | default | `"ALTER SEQUENCE is not allowed: DDL operations are blocked"` |
+| `TestDDL_Rename` | `ALTER TABLE users RENAME TO customers` | default | `"RENAME is not allowed: DDL operations are blocked"` |
+| `TestDDL_CreateTable_Allowed` | `CREATE TABLE test (id int)` | AllowDDL=true | allowed |
+| `TestDDL_AlterTable_Allowed` | `ALTER TABLE users ADD COLUMN email text` | AllowDDL=true | allowed |
+| `TestDDL_CreateIndex_Allowed` | `CREATE INDEX idx_name ON users (name)` | AllowDDL=true | allowed |
+| `TestDDL_DropNotAffectedByDDL` | `DROP TABLE users` | AllowDDL=true | `"DROP statements are not allowed"` (DROP has its own flag) |
+
+#### DISCARD Protection
+
+| Test | SQL | Config | Expected Error Contains |
+|---|---|---|---|
+| `TestDiscard_All` | `DISCARD ALL` | default | `"DISCARD is not allowed: resets session state including prepared statements and temporary tables"` |
+| `TestDiscard_Plans` | `DISCARD PLANS` | default | `"DISCARD is not allowed"` |
+| `TestDiscard_Temp` | `DISCARD TEMPORARY` | default | `"DISCARD is not allowed"` |
+| `TestDiscard_Allowed` | `DISCARD ALL` | AllowDiscard=true | allowed |
+
+#### COMMENT ON Protection
+
+| Test | SQL | Config | Expected Error Contains |
+|---|---|---|---|
+| `TestComment_OnTable` | `COMMENT ON TABLE users IS 'User accounts'` | default | `"COMMENT ON is not allowed: modifies database object metadata"` |
+| `TestComment_OnColumn` | `COMMENT ON COLUMN users.name IS 'Full name'` | default | `"COMMENT ON is not allowed"` |
+| `TestComment_Allowed` | `COMMENT ON TABLE users IS 'User accounts'` | AllowComment=true | allowed |
+
 #### Allowed Statements
 
 | Test | SQL | Config | Expected |
@@ -2423,8 +2699,8 @@ All tests are pure unit tests — no database needed. Default config: all `Allow
 | `TestAllowInsert` | `INSERT INTO users (name) VALUES ('test')` | default | allowed |
 | `TestAllowInsertReturning` | `INSERT INTO users (name) VALUES ('test') RETURNING *` | default | allowed |
 | `TestAllowInsertOnConflict` | `INSERT INTO users (id, name) VALUES (1, 'test') ON CONFLICT (id) DO UPDATE SET name = 'test'` | default | allowed |
-| `TestAllowCreateTable` | `CREATE TABLE test (id int)` | default | allowed (not blocked by protection) |
-| `TestAllowAlterTable` | `ALTER TABLE users ADD COLUMN email text` | default | allowed |
+| `TestAllowCreateTable` | `CREATE TABLE test (id int)` | AllowDDL=true | allowed (DDL must be explicitly enabled) |
+| `TestAllowAlterTable` | `ALTER TABLE users ADD COLUMN email text` | AllowDDL=true | allowed (DDL must be explicitly enabled) |
 | `TestAllowExplain` | `EXPLAIN ANALYZE SELECT * FROM users` | default | allowed |
 | `TestAllowDeleteWithWhere` | `DELETE FROM users WHERE id = 1` | default | allowed |
 | `TestAllowUpdateWithWhere` | `UPDATE users SET active = false WHERE id = 1` | default | allowed |
@@ -2573,11 +2849,12 @@ These test the `runGoBeforeHooks` and `runGoAfterHooks` methods directly, using 
 | `TestLoadConfigValidation_HookTimeoutFallback` | hook with `timeout_seconds` = 0, `default_hook_timeout_seconds` = 10 | hook uses default (10s) |
 | `TestLoadConfigValidation_HealthCheckPathEmpty` | `health_check_enabled` = true, `health_check_path` = "" | panics with message containing `"health_check_path"` |
 | `TestLoadConfigValidation_HealthCheckPathNotRequiredWhenDisabled` | `health_check_enabled` = false, `health_check_path` = "" | no panic (path not needed when disabled) |
-| `TestLoadConfigProtectionDefaults` | minimal config, no protection fields | all `Allow*` fields are `false` (Go zero-value = blocked), including `AllowCopyFrom`, `AllowCopyTo`, `AllowCreateFunction`, `AllowPrepare`, `AllowMerge`, `AllowGrantRevoke`, `AllowManageRoles` |
+| `TestLoadConfigDefaults_MaxSQLLength` | config with `max_sql_length` omitted (0) | defaults to `100000` |
+| `TestLoadConfigProtectionDefaults` | minimal config, no protection fields | all `Allow*` fields are `false` (Go zero-value = blocked), including `AllowCopyFrom`, `AllowCopyTo`, `AllowCreateFunction`, `AllowPrepare`, `AllowMerge`, `AllowGrantRevoke`, `AllowManageRoles`, `AllowCreateExtension`, `AllowLockTable`, `AllowListenNotify`, `AllowMaintenance`, `AllowDDL`, `AllowDiscard`, `AllowComment` |
 | `TestLoadConfigProtectionExplicitAllow` | config with `allow_drop: true` | `AllowDrop` is `true`, all others remain `false` |
-| `TestLoadConfigProtectionNewFields` | config with `allow_copy_from: true, allow_copy_to: true, allow_create_function: true, allow_prepare: true, allow_merge: true, allow_grant_revoke: true, allow_manage_roles: true` | respective fields are `true`, others remain `false` |
+| `TestLoadConfigProtectionNewFields` | config with `allow_copy_from: true, allow_copy_to: true, allow_create_function: true, allow_prepare: true, allow_merge: true, allow_grant_revoke: true, allow_manage_roles: true, allow_create_extension: true, allow_lock_table: true, allow_listen_notify: true, allow_maintenance: true, allow_ddl: true, allow_discard: true, allow_comment: true` | respective fields are `true`, others remain `false` |
 | `TestLoadConfigSSLMode` | config with `sslmode: "verify-full"` | `Connection.SSLMode` is `"verify-full"` |
-| `TestLoadConfigValidation_GoHooksAndCmdHooksMutuallyExclusive` | config with both `BeforeQueryHooks` (Go) and `ServerHooks.BeforeQuery` (command) | panics with message about mutual exclusivity |
+| `TestLoadConfigValidation_GoHooksAndCmdHooksMutuallyExclusive` | config with both `BeforeQueryHooks` (Go) and `WithServerHooks` option (command) | panics with message about mutual exclusivity |
 | `TestLoadConfigValidation_GoHooksRequireDefaultTimeout` | config with `BeforeQueryHooks` set but `default_hook_timeout_seconds` = 0 | panics with message containing `"default_hook_timeout_seconds"` |
 | `TestLoadConfigValidation_GoHooksOnlyNoCmd` | config with only `BeforeQueryHooks` (Go), no command hooks | no panic (valid configuration) |
 
@@ -2643,6 +2920,12 @@ Run with: `go test -tags=integration -race -v ./...`
 | `TestQuery_ReadOnlyStatementRollbacksBeforeHooks` | Config with AfterQuery hook that tracks invocation time vs commit | `SELECT * FROM users` | Hook is called, but no commit occurs (rollback before hooks for SELECT). |
 | `TestQuery_ExplainAnalyzeProtection` | Table | `EXPLAIN ANALYZE DELETE FROM users` | Error: `"DELETE without WHERE clause is not allowed"` |
 | `TestQuery_UTF8Truncation` | Table with multi-byte UTF-8 data (e.g. emoji, CJK characters) | SELECT with low max_result_length | Truncated output is valid UTF-8 (no broken multi-byte sequences) |
+| `TestQuery_MaxSQLLength` | Config with max_sql_length=100 | SQL string of 200 bytes | Error: `"SQL query too long: 200 bytes exceeds maximum of 100 bytes"` |
+| `TestQuery_MaxSQLLength_ExactLimit` | Config with max_sql_length=20 | `SELECT 1` (under 20 bytes) | Query succeeds |
+| `TestQuery_DDLBlocked` | Default config | `CREATE TABLE test (id int)` | Error: `"CREATE TABLE is not allowed: DDL operations are blocked"` |
+| `TestQuery_DDLAllowed` | Config with AllowDDL=true | `CREATE TABLE test (id int)` | Table created successfully |
+| `TestQuery_CreateExtensionBlocked` | Default config | `CREATE EXTENSION IF NOT EXISTS pg_trgm` | Error: `"CREATE EXTENSION is not allowed"` |
+| `TestQuery_MaintenanceBlocked` | Default config | `ANALYZE users` | Error: `"VACUUM/ANALYZE is not allowed"` |
 
 #### Go Hook Integration Tests (Library Mode)
 
@@ -3054,8 +3337,8 @@ Must include:
    - Connection (host, port, dbname, sslmode) — used when `GOPGMCP_PG_CONNSTRING` env var is not set
    - Pool settings (mirrors pgxpool config)
    - Server settings (port, read_only, timezone, health check)
-   - Protection rules (SET, DROP, TRUNCATE, DO blocks, DELETE/UPDATE WHERE) — all blocked by default (`false` = blocked, `true` = allowed)
-   - Query settings (default timeout, max result length, timeout rules)
+   - Protection rules (SET, DROP, TRUNCATE, DO blocks, DELETE/UPDATE WHERE, DDL, CREATE EXTENSION, LOCK TABLE, LISTEN/NOTIFY, maintenance, DISCARD, COMMENT ON, MERGE, GRANT/REVOKE, role management) — all blocked by default (`false` = blocked, `true` = allowed)
+   - Query settings (default timeout, max SQL length, max result length, timeout rules)
    - Error prompts (regex → message, evaluated against ALL errors including hook/Go errors)
    - Sanitization rules (regex → replacement, applied per-field recursively into JSONB/arrays)
    - Hooks (before_query, after_query) with command, args, pattern, and timeout
@@ -3077,15 +3360,22 @@ Must include:
    - Config must be built and passed programmatically in library mode.
 
 7. **Tool reference:**
-   - Query: full pipeline (hooks → protection → timeout → execute → hooks → sanitization → truncation), returns JSON with `rows_affected` count
+   - Query: full pipeline (SQL length check → hooks → protection → timeout → execute → hooks → sanitization → truncation → logging), returns JSON with `rows_affected` count
    - ListTables: lists tables, views, materialized views, foreign tables, partitioned tables accessible to the connected user. Flags tables with restricted schema access.
    - DescribeTable: returns schema details including columns, indexes, constraints, foreign keys, partition info, and view definitions. Defaults schema to "public".
 
-8. **Known limitations:**
+8. **Logging documentation:**
+   - Query logging: all successful queries logged at Info with SQL (truncated), duration, row count, rows affected. Errors logged at Error with SQL and error message.
+   - ListTables/DescribeTable: logged at Info with duration and result counts.
+   - AI agent sessions: MCP `initialize` calls logged at Info with client name/version.
+   - SET commands through the Query tool are classified as read-only and rolled back — they have no lasting session effect. Use `Config.Timezone` and `Config.ReadOnly` for session-level settings.
+
+9. **Known limitations:**
    - `QueryExecModeExec` (simple protocol) prevents SQL injection and multi-statement queries but may affect type mapping for some Postgres types
    - Multi-statement queries are always rejected (cannot be toggled off)
    - Protection checks work at the SQL AST level — they cannot inspect dynamic SQL inside PL/pgSQL functions (DO blocks and CREATE FUNCTION/PROCEDURE are blocked by default)
    - EXPLAIN ANALYZE always checks its inner statement against protection rules
+   - SET commands through the Query tool are rolled back (intentional — session settings should use Config.Timezone/ReadOnly via AfterConnect)
 
 ### Code Comments
 

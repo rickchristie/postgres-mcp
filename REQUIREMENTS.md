@@ -132,11 +132,19 @@ Create Postgres MCP with Golang.
     - MERGE - blocked by default (`allow_merge: false`). MERGE can perform INSERT, UPDATE, and DELETE operations in a single statement, potentially bypassing individual DML protection rules.
     - GRANT / REVOKE - blocked by default (`allow_grant_revoke: false`). Can modify database permissions and access controls.
     - CREATE ROLE / ALTER ROLE / DROP ROLE - blocked by default (`allow_manage_roles: false`). Includes CREATE USER, DROP USER (syntactic sugar for CREATE/DROP ROLE). Can create/modify/delete database roles and their privileges, including granting SUPERUSER.
+    - CREATE EXTENSION - blocked by default (`allow_create_extension: false`). CREATE EXTENSION can load arbitrary server-side code (C libraries) into the PostgreSQL process. Extremely dangerous — equivalent to arbitrary code execution on the database server.
+    - LOCK TABLE - blocked by default (`allow_lock_table: false`). Explicit LOCK TABLE can acquire exclusive locks, causing deadlocks or denial of service by blocking other queries indefinitely.
+    - LISTEN / NOTIFY - blocked by default (`allow_listen_notify: false`). LISTEN/NOTIFY can be used for side-channel communication between sessions. NOTIFY can also send arbitrary payloads to any listening session.
+    - Maintenance commands (VACUUM, ANALYZE, CLUSTER, REINDEX) - blocked by default (`allow_maintenance: false`). These commands can acquire heavy locks (CLUSTER, REINDEX acquire ACCESS EXCLUSIVE), cause significant I/O load, and run for extended periods on large tables.
+    - DDL (CREATE TABLE, ALTER TABLE, CREATE INDEX, CREATE SCHEMA, CREATE VIEW, CREATE SEQUENCE, etc.) - blocked by default (`allow_ddl: false`). Structural DDL changes can lock tables, consume disk space, and modify the database schema unexpectedly. This does NOT cover DROP (separate `allow_drop`), CREATE FUNCTION/PROCEDURE (separate `allow_create_function`), or CREATE EXTENSION (separate `allow_create_extension`).
+    - DISCARD - blocked by default (`allow_discard: false`). DISCARD ALL/PLANS/SEQUENCES/TEMPORARY resets session state including prepared statements, temporary tables, and cached plans.
+    - COMMENT ON - blocked by default (`allow_comment: false`). COMMENT modifies database object metadata. While low-risk, uncontrolled metadata changes can be confusing in shared environments.
     - Multi-statement queries (e.g. `SELECT 1; DROP TABLE users`) - always blocked, cannot be toggled.
     - EXPLAIN / EXPLAIN ANALYZE - always recurses into the inner statement and applies all protection rules. `EXPLAIN ANALYZE` actually executes the query, so `EXPLAIN ANALYZE DELETE FROM users` must be blocked when DELETE without WHERE is blocked. This is not togglable — EXPLAIN always checks its inner statement. Note: PostgreSQL's grammar only allows certain statements inside EXPLAIN (SELECT, INSERT, UPDATE, DELETE, MERGE) — statements like DROP, TRUNCATE, etc. inside EXPLAIN produce parse errors before reaching protection checks.
     - When Read-only mode is on, additionally block:
       - `RESET ALL` and `RESET default_transaction_read_only` (could disable read-only mode).
       - `BEGIN READ WRITE` / `START TRANSACTION READ WRITE` (explicit write transaction).
+  - Max SQL length (in bytes). Rejects queries exceeding this length before any processing (parsing, hooks, protection). Defaults to 100000 if not set (0). Must be > 0 after default. Configurable via `query.max_sql_length`. Prevents excessively large SQL strings from consuming memory during parsing and hook processing.
   - Max result length (in character length). Applied to the JSON result, if exceeded, truncate and append "...[truncated] Result is too long! Add limits in your query!". Defaults to 100000 if not set (0). Cannot be disabled — there is no "no limit" option.
   - Health check path. No default — must be explicitly set when health check is enabled. Server panics on start if health check is enabled and path is empty.
 - Authentication:
@@ -146,14 +154,23 @@ Create Postgres MCP with Golang.
   - People can install as CLI tool and run as long as they have Golang.
 - This Golang MCP library is not only startable as CLI MCP server, but also a library that can be initialized and then registered as internal Agent Loop code as tool call.
   - Config is split into two types to cleanly separate library and server concerns:
-    - `Config` (base) — contains all fields needed for the query engine: pool, protection, query settings, error prompts, sanitization, hooks, read_only, timezone, default_hook_timeout_seconds. Used directly by library mode via `New()`.
-    - `ServerConfig` — embeds `Config` and adds server-only fields: connection (host/port/dbname/sslmode), server settings (port, health check), and logging config. Used by CLI mode. The CLI extracts the embedded `Config` to pass to `New()`.
-  - Library mode: `New(ctx, connString, Config, logger)` returns `*PostgresMcp`. Library users provide their own connection string and logger. Server-specific fields (connection, port, health check, logging) are not needed.
+    - `Config` (base) — contains all fields needed for the query engine: pool, protection, query settings, error prompts, sanitization, Go hooks, read_only, timezone, default_hook_timeout_seconds. Used directly by library mode via `New()`.
+    - `ServerConfig` — embeds `Config` and adds server-only fields: connection (host/port/dbname/sslmode), server settings (port, health check), logging config, and server_hooks (command-based hooks). Used by CLI mode. The CLI extracts the embedded `Config` to pass to `New()`, with server_hooks passed via `WithServerHooks()` option.
+  - Library mode: `New(ctx, connString, Config, logger, ...Option)` returns `*PostgresMcp`. Library users provide their own connection string and logger. Server-specific fields (connection, port, health check, logging) are not needed. CLI uses `WithServerHooks()` option to pass command-based hooks from `ServerConfig.ServerHooks`.
   - CLI mode: Uses `ServerConfig` which includes everything. Connection details come from `ServerConfig.Connection` (or env var). Logger is created from `ServerConfig.Logging`.
   - PostgresMcp hooks, sanitization, etc can also be passed from the Config object.
   - The API for library mode is the tool calls. For each tool (e.g. Query, ListTables, DescribeTable) - there's a function that can be called directly.
     - Each function takes context, and input struct, and returns output struct and error.
   - All tool functions (Query, ListTables, DescribeTable) are safe for concurrent use from multiple goroutines. All internal state is either immutable after construction or goroutine-safe (pgxpool, channel semaphore, zerolog).
+- Query logging:
+  - Every successful query execution is logged at Info level with: SQL text (truncated to reasonable length for logging), duration, row count, and rows affected.
+  - Every failed query is logged at Error level with: SQL text (truncated), duration, and error message. This is already handled by `handleError`.
+  - ListTables and DescribeTable successful executions are logged at Info level with duration.
+  - Query logging is always on — not configurable. This is essential for debugging and auditing in production.
+- AI agent session logging:
+  - Log at Info level when an MCP `initialize` request is received (agent connected), including client info if available from the initialize params (client name, version).
+  - Log at Info level when an MCP session is terminated or client disconnects, including session duration.
+  - In stateless mode (current default), log each initialize call. There is no explicit disconnect event — the session ends when the HTTP request completes.
 - Use zerolog as logger.
 - No graceful shutdown needed. If server is killed, close all connections immediately. `Close()` accepts a context parameter for library users who need controlled shutdown.
 - Config validation panics on startup (not errors). This is intentional — both CLI and library mode are expected to initialize at application startup. Missing/invalid config values should crash immediately rather than produce subtle runtime failures. Library users call `New()` during initialization, so panics are caught at startup.
@@ -201,12 +218,20 @@ Create Postgres MCP with Golang.
       "allow_alter_system": false,
       "allow_merge": false,
       "allow_grant_revoke": false,
-      "allow_manage_roles": false
+      "allow_manage_roles": false,
+      "allow_create_extension": false,
+      "allow_lock_table": false,
+      "allow_listen_notify": false,
+      "allow_maintenance": false,
+      "allow_ddl": false,
+      "allow_discard": false,
+      "allow_comment": false
     },
     "query": {
       "default_timeout_seconds": 30,
       "list_tables_timeout_seconds": 10,
       "describe_table_timeout_seconds": 10,
+      "max_sql_length": 100000,
       "max_result_length": 100000,
       "timeout_rules": [
         {
