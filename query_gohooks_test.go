@@ -491,3 +491,235 @@ func TestQuery_GoHooksDefaultTimeoutRequired(t *testing.T) {
 	// This should panic because DefaultHookTimeoutSeconds is 0
 	_, _ = pgmcp.New(ctx, connStr, config, testLogger())
 }
+
+// --- Section 5: Missing Go Hook Integration Tests ---
+
+// appendBeforeHook appends a suffix to the query.
+type appendBeforeHook struct {
+	suffix string
+}
+
+func (h *appendBeforeHook) Run(_ context.Context, query string) (string, error) {
+	return query + h.suffix, nil
+}
+
+// appendRowAfterHook appends a synthetic row to the result.
+type appendRowAfterHook struct{}
+
+func (h *appendRowAfterHook) Run(_ context.Context, result *pgmcp.QueryOutput) (*pgmcp.QueryOutput, error) {
+	newRow := make(map[string]interface{})
+	for _, col := range result.Columns {
+		newRow[col] = "appended"
+	}
+	result.Rows = append(result.Rows, newRow)
+	return result, nil
+}
+
+// typeAssertAfterHook verifies the Go types received by the hook and stores them.
+type typeAssertAfterHook struct {
+	receivedTypes map[string]string // column name -> Go type name
+}
+
+func (h *typeAssertAfterHook) Run(_ context.Context, result *pgmcp.QueryOutput) (*pgmcp.QueryOutput, error) {
+	h.receivedTypes = make(map[string]string)
+	if len(result.Rows) > 0 {
+		for col, val := range result.Rows[0] {
+			h.receivedTypes[col] = fmt.Sprintf("%T", val)
+		}
+	}
+	return result, nil
+}
+
+func TestQuery_GoBeforeHook_Chaining(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.DefaultHookTimeoutSeconds = 5
+	// First hook appends " AS a", second hook appends " -- tagged"
+	config.BeforeQueryHooks = []pgmcp.BeforeQueryHookEntry{
+		{Name: "append_as_a", Hook: &appendBeforeHook{suffix: " AS a"}},
+		{Name: "append_tag", Hook: &appendBeforeHook{suffix: " -- tagged"}},
+	}
+	p, _ := newTestInstance(t, config)
+
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "SELECT 1"})
+	if output.Error != "" {
+		t.Fatalf("unexpected error: %s", output.Error)
+	}
+	// "SELECT 1" → "SELECT 1 AS a" → "SELECT 1 AS a -- tagged"
+	// The final query executed is "SELECT 1 AS a -- tagged", column should be "a"
+	if len(output.Rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(output.Rows))
+	}
+	if len(output.Columns) != 1 || output.Columns[0] != "a" {
+		t.Fatalf("expected column 'a' from chained hooks, got %v", output.Columns)
+	}
+	val, ok := output.Rows[0]["a"].(int32)
+	if !ok {
+		t.Fatalf("expected int32, got %T: %v", output.Rows[0]["a"], output.Rows[0]["a"])
+	}
+	if val != 1 {
+		t.Fatalf("expected 1, got %d", val)
+	}
+}
+
+func TestQuery_GoBeforeHook_PerHookTimeout(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.DefaultHookTimeoutSeconds = 1 // default timeout is 1s
+	config.BeforeQueryHooks = []pgmcp.BeforeQueryHookEntry{
+		{
+			Name:    "slow_but_ok",
+			Timeout: 2 * time.Second, // per-hook timeout is 2s
+			Hook:    &slowBeforeHook{sleepDuration: 1500 * time.Millisecond}, // sleeps 1.5s
+		},
+	}
+	p, _ := newTestInstance(t, config)
+
+	// Hook sleeps 1.5s. Default timeout 1s would fail, but per-hook timeout 2s should succeed.
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "SELECT 1 AS val"})
+	if output.Error != "" {
+		t.Fatalf("expected query to succeed with per-hook timeout override, got error: %s", output.Error)
+	}
+	if len(output.Rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(output.Rows))
+	}
+	val, ok := output.Rows[0]["val"].(int32)
+	if !ok {
+		t.Fatalf("expected int32, got %T: %v", output.Rows[0]["val"], output.Rows[0]["val"])
+	}
+	if val != 1 {
+		t.Fatalf("expected 1, got %d", val)
+	}
+}
+
+func TestQuery_GoAfterHook_Chaining(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.DefaultHookTimeoutSeconds = 5
+	// First hook adds a column, second hook appends a row
+	config.AfterQueryHooks = []pgmcp.AfterQueryHookEntry{
+		{Name: "add_column", Hook: &addColumnAfterHook{}},
+		{Name: "append_row", Hook: &appendRowAfterHook{}},
+	}
+	p, _ := newTestInstance(t, config)
+
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "SELECT 1 AS val"})
+	if output.Error != "" {
+		t.Fatalf("unexpected error: %s", output.Error)
+	}
+
+	// First hook adds "hook_added" column, second hook appends a row
+	if len(output.Columns) != 2 {
+		t.Fatalf("expected 2 columns (val + hook_added), got %d: %v", len(output.Columns), output.Columns)
+	}
+	if output.Columns[0] != "val" || output.Columns[1] != "hook_added" {
+		t.Fatalf("expected columns [val, hook_added], got %v", output.Columns)
+	}
+
+	// Should have 2 rows: original + appended
+	if len(output.Rows) != 2 {
+		t.Fatalf("expected 2 rows (original + appended), got %d", len(output.Rows))
+	}
+
+	// Original row has int32(1) for val, "injected" for hook_added
+	if output.Rows[0]["hook_added"] != "injected" {
+		t.Fatalf("expected 'injected' in first row, got %v", output.Rows[0]["hook_added"])
+	}
+
+	// Appended row has "appended" for both columns (appendRowAfterHook sets all to "appended")
+	if output.Rows[1]["val"] != "appended" {
+		t.Fatalf("expected 'appended' in appended row val, got %v", output.Rows[1]["val"])
+	}
+	if output.Rows[1]["hook_added"] != "appended" {
+		t.Fatalf("expected 'appended' in appended row hook_added, got %v", output.Rows[1]["hook_added"])
+	}
+}
+
+func TestQuery_GoAfterHook_ReceivesNativeTypes(t *testing.T) {
+	t.Parallel()
+	setupConfig := defaultConfig()
+	setupConfig.Protection.AllowDDL = true
+	setupP, connStr := newTestInstance(t, setupConfig)
+	setupTable(t, setupP, "CREATE TABLE native_types_test (big_id bigint, name text)")
+	setupTable(t, setupP, "INSERT INTO native_types_test VALUES (9007199254740993, 'hello')") // 2^53+1
+	setupP.Close(context.Background())
+
+	// Hook that captures the Go types of each column
+	typeHook := &typeAssertAfterHook{}
+	config := defaultConfig()
+	config.DefaultHookTimeoutSeconds = 5
+	config.AfterQueryHooks = []pgmcp.AfterQueryHookEntry{
+		{Name: "type_check", Hook: typeHook},
+	}
+	ctx := context.Background()
+	p, err := pgmcp.New(ctx, connStr, config, testLogger())
+	if err != nil {
+		t.Fatalf("Failed to create PostgresMcp: %v", err)
+	}
+	defer p.Close(ctx)
+
+	output := p.Query(ctx, pgmcp.QueryInput{SQL: "SELECT big_id, name FROM native_types_test"})
+	if output.Error != "" {
+		t.Fatalf("unexpected error: %s", output.Error)
+	}
+
+	// Verify the hook received native Go types (no JSON serialization)
+	if typeHook.receivedTypes["big_id"] != "int64" {
+		t.Fatalf("expected int64 for big_id, hook received %s", typeHook.receivedTypes["big_id"])
+	}
+	if typeHook.receivedTypes["name"] != "string" {
+		t.Fatalf("expected string for name, hook received %s", typeHook.receivedTypes["name"])
+	}
+
+	// Also verify the actual value preserved
+	val := output.Rows[0]["big_id"]
+	int64Val, ok := val.(int64)
+	if !ok {
+		t.Fatalf("expected int64 in output, got %T", val)
+	}
+	if int64Val != 9007199254740993 {
+		t.Fatalf("expected 9007199254740993, got %d", int64Val)
+	}
+}
+
+func TestQuery_GoAfterHook_SelectRollbacksBeforeHooks(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.Protection.AllowDDL = true
+	config.DefaultHookTimeoutSeconds = 5
+
+	// Use a passthrough hook — the key assertion is that SELECT rollback happens before hooks
+	// and the hook still runs successfully with the query result
+	captureHook := &captureAfterHook{}
+	config.AfterQueryHooks = []pgmcp.AfterQueryHookEntry{
+		{Name: "capture", Hook: captureHook},
+	}
+	p, _ := newTestInstance(t, config)
+
+	setupTable(t, p, "CREATE TABLE select_rb_test (id serial PRIMARY KEY, name text)")
+	setupTable(t, p, "INSERT INTO select_rb_test (name) VALUES ('test_row')")
+
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "SELECT * FROM select_rb_test"})
+	if output.Error != "" {
+		t.Fatalf("unexpected error: %s", output.Error)
+	}
+
+	// The hook was called and received the SELECT result
+	if captureHook.captured == nil {
+		t.Fatal("expected hook to be called")
+	}
+	if len(captureHook.captured.Rows) != 1 {
+		t.Fatalf("expected hook to receive 1 row, got %d", len(captureHook.captured.Rows))
+	}
+	if captureHook.captured.Rows[0]["name"] != "test_row" {
+		t.Fatalf("expected hook to receive 'test_row', got %v", captureHook.captured.Rows[0]["name"])
+	}
+
+	// Result correct
+	if len(output.Rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(output.Rows))
+	}
+	if output.Rows[0]["name"] != "test_row" {
+		t.Fatalf("expected 'test_row', got %v", output.Rows[0]["name"])
+	}
+}

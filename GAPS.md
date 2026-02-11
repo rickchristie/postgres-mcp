@@ -94,44 +94,48 @@ Comprehensive comparison of the specification against the implemented code. Orga
 
 ---
 
-## 4. Missing Integration Tests — Query Tool (Section 6.7, lines 2987-3058)
+## ~~4. Missing Integration Tests — Query Tool (Section 6.7, lines 2987-3058)~~
+
+~~All 22 tests implemented in `integration_test.go`.~~
 
 | # | Missing Test | Description |
 |---|---|---|
-| 1 | `TestQuery_JSONBReturnType` | JSONB returned as parsed Go map/slice, not string |
-| 2 | `TestQuery_JSONBNumericPrecision` | Large integers in JSONB lose precision (known limitation) |
-| 3 | `TestQuery_SelectNestedSubquery` | Query with nested subqueries |
-| 4 | `TestQuery_Transaction` | Verify query runs in transaction (data consistency) |
-| 5 | `TestQuery_HooksEndToEnd` | Config with real hook scripts, hook executed |
-| 6 | `TestQuery_HookTimeoutStopsPipeline` | slow.sh with timeout=1s stops pipeline |
-| 7 | `TestQuery_TimezoneEmpty` | timezone="" returns server default |
-| 8 | `TestQuery_TimezoneWithReadOnly` | Both timezone and read_only applied via AfterConnect |
-| 9 | `TestQuery_NumericPrecisionWithHooks` | Bigint survives JSON round-trip through cmd hooks |
-| 10 | `TestQuery_NumericPrecisionWithoutHooks` | Bigint preserved without hooks (no round-trip) |
-| 11 | `TestQuery_RowsAffected_Select` | SELECT returns row count in RowsAffected |
-| 12 | `TestQuery_RowsAffected_InsertReturning` | INSERT RETURNING has RowsAffected=1 and rows |
-| 13 | `TestQuery_CidrColumn` | cidr value returned as string |
-| 14 | `TestQuery_AfterHookRejectSelectNoSideEffect` | Hook rejects SELECT, no side effect |
-| 15 | `TestQuery_ReadOnlyStatementRollbacksBeforeHooks` | SELECT triggers rollback before hooks |
-| 16 | `TestQuery_MaxSQLLength_ExactLimit` | Query under max_sql_length limit succeeds |
-| 17 | `TestQuery_CreateExtensionBlocked` | CREATE EXTENSION blocked by default |
-| 18 | `TestQuery_MaintenanceBlocked` | ANALYZE blocked by AllowMaintenance |
-| 19 | `TestQuery_CreateTriggerBlocked` | CREATE TRIGGER blocked by default |
-| 20 | `TestQuery_CreateRuleBlocked` | CREATE RULE blocked by default |
-| 21 | `TestQuery_CommitBlocked` | COMMIT blocked (transaction control) |
-| 22 | `TestQuery_AlterExtensionBlocked` | ALTER EXTENSION blocked by default |
+| ~~1~~ | ~~`TestQuery_JSONBReturnType`~~ | ~~JSONB returned as parsed Go map/slice, not string~~ |
+| ~~2~~ | ~~`TestQuery_JSONBNumericPrecision`~~ | ~~Large integers in JSONB lose precision (known limitation)~~ |
+| ~~3~~ | ~~`TestQuery_SelectNestedSubquery`~~ | ~~Query with nested subqueries~~ |
+| ~~4~~ | ~~`TestQuery_Transaction`~~ | ~~Verify query runs in transaction (data consistency)~~ |
+| ~~5~~ | ~~`TestQuery_HooksEndToEnd`~~ | ~~Config with real hook scripts, hook executed~~ |
+| ~~6~~ | ~~`TestQuery_HookTimeoutStopsPipeline`~~ | ~~slow.sh with timeout=1s stops pipeline~~ |
+| ~~7~~ | ~~`TestQuery_TimezoneEmpty`~~ | ~~timezone="" returns server default~~ |
+| ~~8~~ | ~~`TestQuery_TimezoneWithReadOnly`~~ | ~~Both timezone and read_only applied via AfterConnect~~ |
+| ~~9~~ | ~~`TestQuery_NumericPrecisionWithHooks`~~ | ~~Bigint survives JSON round-trip through cmd hooks~~ |
+| ~~10~~ | ~~`TestQuery_NumericPrecisionWithoutHooks`~~ | ~~Bigint preserved without hooks (no round-trip)~~ |
+| ~~11~~ | ~~`TestQuery_RowsAffected_Select`~~ | ~~SELECT returns row count in RowsAffected~~ |
+| ~~12~~ | ~~`TestQuery_RowsAffected_InsertReturning`~~ | ~~INSERT RETURNING has RowsAffected=1 and rows~~ |
+| ~~13~~ | ~~`TestQuery_CidrColumn`~~ | ~~cidr value returned as string~~ |
+| ~~14~~ | ~~`TestQuery_AfterHookRejectSelectNoSideEffect`~~ | ~~Hook rejects SELECT, no side effect~~ |
+| ~~15~~ | ~~`TestQuery_ReadOnlyStatementRollbacksBeforeHooks`~~ | ~~SELECT triggers rollback before hooks~~ |
+| ~~16~~ | ~~`TestQuery_MaxSQLLength_ExactLimit`~~ | ~~Query under max_sql_length limit succeeds~~ |
+| ~~17~~ | ~~`TestQuery_CreateExtensionBlocked`~~ | ~~CREATE EXTENSION blocked by default~~ |
+| ~~18~~ | ~~`TestQuery_MaintenanceBlocked`~~ | ~~ANALYZE blocked by AllowMaintenance~~ |
+| ~~19~~ | ~~`TestQuery_CreateTriggerBlocked`~~ | ~~CREATE TRIGGER blocked by default~~ |
+| ~~20~~ | ~~`TestQuery_CreateRuleBlocked`~~ | ~~CREATE RULE blocked by default~~ |
+| ~~21~~ | ~~`TestQuery_CommitBlocked`~~ | ~~COMMIT blocked (transaction control)~~ |
+| ~~22~~ | ~~`TestQuery_AlterExtensionBlocked`~~ | ~~ALTER EXTENSION blocked by default~~ |
 
 ---
 
-## 5. Missing Integration Tests — Go Hook Pipeline (Section 6.7, lines 3059-3084)
+## ~~5. Missing Integration Tests — Go Hook Pipeline (Section 6.7, lines 3059-3084)~~
+
+~~All 5 tests implemented in `query_gohooks_test.go`.~~
 
 | # | Missing Test | Description |
 |---|---|---|
-| 1 | `TestQuery_GoBeforeHook_Chaining` | Two BeforeQueryHooks applied in sequence |
-| 2 | `TestQuery_GoBeforeHook_PerHookTimeout` | entry.Timeout=2s overrides default=1s, hook sleeps 1.5s |
-| 3 | `TestQuery_GoAfterHook_Chaining` | Two AfterQueryHooks applied in sequence |
-| 4 | `TestQuery_GoAfterHook_ReceivesNativeTypes` | Hook receives int64/string, confirms no serialization |
-| 5 | `TestQuery_GoAfterHook_SelectRollbacksBeforeHooks` | SELECT rollback before hooks, hooks still run |
+| ~~1~~ | ~~`TestQuery_GoBeforeHook_Chaining`~~ | ~~Two BeforeQueryHooks applied in sequence~~ |
+| ~~2~~ | ~~`TestQuery_GoBeforeHook_PerHookTimeout`~~ | ~~entry.Timeout=2s overrides default=1s, hook sleeps 1.5s~~ |
+| ~~3~~ | ~~`TestQuery_GoAfterHook_Chaining`~~ | ~~Two AfterQueryHooks applied in sequence~~ |
+| ~~4~~ | ~~`TestQuery_GoAfterHook_ReceivesNativeTypes`~~ | ~~Hook receives int64/string, confirms no serialization~~ |
+| ~~5~~ | ~~`TestQuery_GoAfterHook_SelectRollbacksBeforeHooks`~~ | ~~SELECT rollback before hooks, hooks still run~~ |
 
 ---
 
@@ -203,11 +207,11 @@ The following areas have **zero gaps** between spec and implementation:
 | Config tests | 27 |
 | Hook tests (command) | 1 |
 | ~~Hook tests (Go unit)~~ | ~~7~~ |
-| Integration tests — Query | 22 |
-| Integration tests — Go hooks | 5 |
+| ~~Integration tests — Query~~ | ~~22~~ |
+| ~~Integration tests — Go hooks~~ | ~~5~~ |
 | Integration tests — ListTables | 5 |
 | Integration tests — DescribeTable | 6 |
 | Full pipeline test | 1 |
-| **Total** | **70 items** (was 77, 7 Go hook unit tests fixed) |
+| **Total** | **43 items** (was 77, 7 Go hook unit tests fixed, 22 Query integration tests fixed, 5 Go hook integration tests fixed) |
 
 All production code (protection, hooks, sanitize, errprompt, timeout, query pipeline, convertValue, ListTables, DescribeTable, MCP bridge, config structs) matches the spec with zero functional gaps. The gaps are almost entirely in **test coverage** and the **unimplemented configure feature**.

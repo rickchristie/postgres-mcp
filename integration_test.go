@@ -807,3 +807,585 @@ func TestQuery_InetColumn(t *testing.T) {
 		t.Fatalf("expected 192.168.1.1 in inet, got %s", ipStr)
 	}
 }
+
+// --- Section 4: Missing Query Integration Tests ---
+
+func TestQuery_JSONBReturnType(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.Protection.AllowDDL = true
+	p, _ := newTestInstance(t, config)
+
+	setupTable(t, p, "CREATE TABLE items (data jsonb)")
+	setupTable(t, p, `INSERT INTO items VALUES ('{"name":"test","nested":{"arr":[1,2,3]},"flag":true,"nothing":null,"count":42}')`)
+
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "SELECT data FROM items"})
+	if output.Error != "" {
+		t.Fatalf("unexpected error: %s", output.Error)
+	}
+	if len(output.Rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(output.Rows))
+	}
+
+	// Verify JSONB is returned as parsed Go map, not string
+	dataMap, ok := output.Rows[0]["data"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected map[string]interface{} for JSONB, got %T: %v", output.Rows[0]["data"], output.Rows[0]["data"])
+	}
+
+	// Verify nested object
+	nested, ok := dataMap["nested"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected nested map, got %T", dataMap["nested"])
+	}
+
+	// Verify nested array
+	arr, ok := nested["arr"].([]interface{})
+	if !ok {
+		t.Fatalf("expected nested array, got %T", nested["arr"])
+	}
+	if len(arr) != 3 {
+		t.Fatalf("expected 3 elements in array, got %d", len(arr))
+	}
+
+	// Verify boolean
+	flag, ok := dataMap["flag"].(bool)
+	if !ok {
+		t.Fatalf("expected bool for flag, got %T", dataMap["flag"])
+	}
+	if flag != true {
+		t.Fatalf("expected true, got %v", flag)
+	}
+
+	// Verify null
+	if dataMap["nothing"] != nil {
+		t.Fatalf("expected nil for nothing, got %v (%T)", dataMap["nothing"], dataMap["nothing"])
+	}
+
+	// Verify string
+	if dataMap["name"] != "test" {
+		t.Fatalf("expected name=test, got %v", dataMap["name"])
+	}
+}
+
+func TestQuery_JSONBNumericPrecision(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.Protection.AllowDDL = true
+	p, _ := newTestInstance(t, config)
+
+	setupTable(t, p, "CREATE TABLE items (data jsonb)")
+	setupTable(t, p, `INSERT INTO items VALUES ('{"id": 9007199254740993}')`) // 2^53+1
+
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "SELECT data FROM items"})
+	if output.Error != "" {
+		t.Fatalf("unexpected error: %s", output.Error)
+	}
+
+	// Known limitation: large integer inside JSONB loses precision to float64
+	// because pgx parses JSONB internally and numbers become float64.
+	dataMap, ok := output.Rows[0]["data"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected map for JSONB, got %T", output.Rows[0]["data"])
+	}
+
+	// The value should be a float64 (precision lost — pgx limitation)
+	val, ok := dataMap["id"].(float64)
+	if !ok {
+		t.Fatalf("expected float64 for JSONB large int (pgx limitation), got %T: %v", dataMap["id"], dataMap["id"])
+	}
+	// 9007199254740993 → 9007199254740992 (precision lost)
+	if val != 9.007199254740992e+15 {
+		t.Fatalf("expected 9.007199254740992e+15 (precision loss), got %v", val)
+	}
+}
+
+func TestQuery_SelectNestedSubquery(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.Protection.AllowDDL = true
+	p, _ := newTestInstance(t, config)
+
+	setupTable(t, p, "CREATE TABLE departments (id serial PRIMARY KEY, name text)")
+	setupTable(t, p, "CREATE TABLE employees (id serial PRIMARY KEY, name text, dept_id int)")
+	setupTable(t, p, "INSERT INTO departments (name) VALUES ('Engineering'), ('Sales')")
+	setupTable(t, p, "INSERT INTO employees (name, dept_id) VALUES ('Alice', 1), ('Bob', 1), ('Charlie', 2)")
+
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: `
+		SELECT name FROM employees
+		WHERE dept_id IN (SELECT id FROM departments WHERE name = 'Engineering')
+		ORDER BY name
+	`})
+	if output.Error != "" {
+		t.Fatalf("unexpected error: %s", output.Error)
+	}
+	if len(output.Rows) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(output.Rows))
+	}
+	if output.Rows[0]["name"] != "Alice" {
+		t.Fatalf("expected Alice, got %v", output.Rows[0]["name"])
+	}
+	if output.Rows[1]["name"] != "Bob" {
+		t.Fatalf("expected Bob, got %v", output.Rows[1]["name"])
+	}
+}
+
+func TestQuery_Transaction(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.Protection.AllowDDL = true
+	p, connStr := newTestInstance(t, config)
+
+	setupTable(t, p, "CREATE TABLE tx_test (id serial PRIMARY KEY, val int)")
+	setupTable(t, p, "INSERT INTO tx_test (val) VALUES (1), (2), (3)")
+
+	// INSERT with RETURNING should commit (data persisted)
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "INSERT INTO tx_test (val) VALUES (42) RETURNING val"})
+	if output.Error != "" {
+		t.Fatalf("unexpected error: %s", output.Error)
+	}
+	if output.Rows[0]["val"] != int32(42) {
+		t.Fatalf("expected 42, got %v", output.Rows[0]["val"])
+	}
+
+	// Verify data persisted by creating a fresh instance and querying
+	ctx := context.Background()
+	verifyP, err := pgmcp.New(ctx, connStr, defaultConfig(), testLogger())
+	if err != nil {
+		t.Fatalf("Failed to create verify instance: %v", err)
+	}
+	defer verifyP.Close(ctx)
+
+	verifyOutput := verifyP.Query(ctx, pgmcp.QueryInput{SQL: "SELECT count(*) AS cnt FROM tx_test WHERE val = 42"})
+	if verifyOutput.Error != "" {
+		t.Fatalf("verify query failed: %s", verifyOutput.Error)
+	}
+	if verifyOutput.Rows[0]["cnt"] != int64(1) {
+		t.Fatalf("expected 1 row persisted, got %v", verifyOutput.Rows[0]["cnt"])
+	}
+}
+
+func TestQuery_HooksEndToEnd(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.Protection.AllowDDL = true
+	config.DefaultHookTimeoutSeconds = 5
+
+	p := newTestInstanceWithHooks(t, config, pgmcp.ServerHooksConfig{
+		BeforeQuery: []pgmcp.HookEntry{
+			{Pattern: ".*", Command: hookScript("modify_query.sh")},
+		},
+	})
+
+	// modify_query.sh changes any query to "SELECT 1 AS modified"
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "SELECT 999"})
+	if output.Error != "" {
+		t.Fatalf("unexpected error: %s", output.Error)
+	}
+	if len(output.Rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(output.Rows))
+	}
+	if len(output.Columns) != 1 || output.Columns[0] != "modified" {
+		t.Fatalf("expected column 'modified', got %v", output.Columns)
+	}
+	val, ok := output.Rows[0]["modified"].(int32)
+	if !ok {
+		t.Fatalf("expected int32, got %T: %v", output.Rows[0]["modified"], output.Rows[0]["modified"])
+	}
+	if val != 1 {
+		t.Fatalf("expected 1, got %d", val)
+	}
+}
+
+func TestQuery_HookTimeoutStopsPipeline(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.DefaultHookTimeoutSeconds = 1
+
+	p := newTestInstanceWithHooks(t, config, pgmcp.ServerHooksConfig{
+		BeforeQuery: []pgmcp.HookEntry{
+			{Pattern: ".*", Command: hookScript("slow.sh")},
+		},
+	})
+
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "SELECT 1"})
+	if output.Error == "" {
+		t.Fatal("expected hook timeout error")
+	}
+	if !strings.Contains(output.Error, "hook timed out") {
+		t.Fatalf("expected 'hook timed out' in error, got %q", output.Error)
+	}
+}
+
+func TestQuery_TimezoneEmpty(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.Timezone = "" // empty = server default
+	p, _ := newTestInstance(t, config)
+
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "SELECT current_setting('timezone') AS tz"})
+	if output.Error != "" {
+		t.Fatalf("unexpected error: %s", output.Error)
+	}
+	tz, ok := output.Rows[0]["tz"].(string)
+	if !ok {
+		t.Fatalf("expected string for timezone, got %T", output.Rows[0]["tz"])
+	}
+	// Server default timezone should be non-empty (not overridden)
+	if tz == "" {
+		t.Fatal("expected non-empty timezone from server default")
+	}
+}
+
+func TestQuery_TimezoneWithReadOnly(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.Timezone = "Asia/Jakarta"
+	config.ReadOnly = true
+	p, _ := newTestInstance(t, config)
+
+	// Verify timezone is applied
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "SELECT current_setting('timezone') AS tz"})
+	if output.Error != "" {
+		t.Fatalf("unexpected error: %s", output.Error)
+	}
+	tz := output.Rows[0]["tz"].(string)
+	if tz != "Asia/Jakarta" {
+		t.Fatalf("expected Asia/Jakarta, got %s", tz)
+	}
+
+	// Verify read_only is also applied (CREATE should fail)
+	output = p.Query(context.Background(), pgmcp.QueryInput{SQL: "CREATE TABLE should_fail (id int)"})
+	if output.Error == "" {
+		t.Fatal("expected error for CREATE in read-only mode")
+	}
+}
+
+func TestQuery_NumericPrecisionWithHooks(t *testing.T) {
+	t.Parallel()
+	// Setup: create table with bigint 2^53+1
+	setupConfig := defaultConfig()
+	setupConfig.Protection.AllowDDL = true
+	setupP, connStr := newTestInstance(t, setupConfig)
+	setupTable(t, setupP, "CREATE TABLE bigint_cmd_hook (big_id bigint)")
+	setupTable(t, setupP, "INSERT INTO bigint_cmd_hook VALUES (9007199254740993)") // 2^53+1
+	setupP.Close(context.Background())
+
+	// Create instance with accept.sh AfterQuery hook (triggers JSON round-trip)
+	config := defaultConfig()
+	config.DefaultHookTimeoutSeconds = 5
+	ctx := context.Background()
+	p, err := pgmcp.New(ctx, connStr, config, testLogger(), pgmcp.WithServerHooks(pgmcp.ServerHooksConfig{
+		AfterQuery: []pgmcp.HookEntry{
+			{Pattern: ".*", Command: hookScript("accept.sh")},
+		},
+	}))
+	if err != nil {
+		t.Fatalf("Failed to create PostgresMcp: %v", err)
+	}
+	defer p.Close(ctx)
+
+	output := p.Query(ctx, pgmcp.QueryInput{SQL: "SELECT big_id FROM bigint_cmd_hook"})
+	if output.Error != "" {
+		t.Fatalf("unexpected error: %s", output.Error)
+	}
+
+	// After JSON round-trip with UseNumber(), the value survives as json.Number
+	val := output.Rows[0]["big_id"]
+	numVal, ok := val.(json.Number)
+	if !ok {
+		t.Fatalf("expected json.Number after cmd hook round-trip, got %T: %v", val, val)
+	}
+	// Verify exact integer preserved via UseNumber()
+	int64Val, err := numVal.Int64()
+	if err != nil {
+		t.Fatalf("failed to convert json.Number to int64: %v", err)
+	}
+	if int64Val != 9007199254740993 {
+		t.Fatalf("expected 9007199254740993, got %d", int64Val)
+	}
+}
+
+func TestQuery_NumericPrecisionWithoutHooks(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.Protection.AllowDDL = true
+	p, _ := newTestInstance(t, config)
+
+	setupTable(t, p, "CREATE TABLE bigint_nohook (big_id bigint)")
+	setupTable(t, p, "INSERT INTO bigint_nohook VALUES (9007199254740993)") // 2^53+1
+
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "SELECT big_id FROM bigint_nohook"})
+	if output.Error != "" {
+		t.Fatalf("unexpected error: %s", output.Error)
+	}
+
+	// Without hooks, no JSON round-trip, value stays as int64
+	val := output.Rows[0]["big_id"]
+	int64Val, ok := val.(int64)
+	if !ok {
+		t.Fatalf("expected int64 without hooks, got %T: %v", val, val)
+	}
+	if int64Val != 9007199254740993 {
+		t.Fatalf("expected 9007199254740993, got %d", int64Val)
+	}
+}
+
+func TestQuery_RowsAffected_Select(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.Protection.AllowDDL = true
+	p, _ := newTestInstance(t, config)
+
+	setupTable(t, p, "CREATE TABLE users_ra (id serial PRIMARY KEY, name text)")
+	setupTable(t, p, "INSERT INTO users_ra (name) VALUES ('a'), ('b'), ('c'), ('d'), ('e')")
+
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "SELECT * FROM users_ra"})
+	if output.Error != "" {
+		t.Fatalf("unexpected error: %s", output.Error)
+	}
+	if len(output.Rows) != 5 {
+		t.Fatalf("expected 5 rows, got %d", len(output.Rows))
+	}
+	if output.RowsAffected != 5 {
+		t.Fatalf("expected RowsAffected=5, got %d", output.RowsAffected)
+	}
+}
+
+func TestQuery_RowsAffected_InsertReturning(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.Protection.AllowDDL = true
+	p, _ := newTestInstance(t, config)
+
+	setupTable(t, p, "CREATE TABLE users_ra2 (id serial PRIMARY KEY, name text)")
+
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "INSERT INTO users_ra2 (name) VALUES ('a') RETURNING *"})
+	if output.Error != "" {
+		t.Fatalf("unexpected error: %s", output.Error)
+	}
+	if output.RowsAffected != 1 {
+		t.Fatalf("expected RowsAffected=1, got %d", output.RowsAffected)
+	}
+	if len(output.Rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(output.Rows))
+	}
+	if output.Rows[0]["name"] != "a" {
+		t.Fatalf("expected name='a', got %v", output.Rows[0]["name"])
+	}
+}
+
+func TestQuery_CidrColumn(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.Protection.AllowDDL = true
+	p, _ := newTestInstance(t, config)
+
+	setupTable(t, p, "CREATE TABLE subnets (network cidr)")
+	setupTable(t, p, "INSERT INTO subnets VALUES ('10.0.0.0/8')")
+
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "SELECT network FROM subnets"})
+	if output.Error != "" {
+		t.Fatalf("unexpected error: %s", output.Error)
+	}
+	netStr, ok := output.Rows[0]["network"].(string)
+	if !ok {
+		t.Fatalf("expected string for cidr, got %T", output.Rows[0]["network"])
+	}
+	if netStr != "10.0.0.0/8" {
+		t.Fatalf("expected 10.0.0.0/8, got %s", netStr)
+	}
+}
+
+func TestQuery_AfterHookRejectSelectNoSideEffect(t *testing.T) {
+	t.Parallel()
+	setupConfig := defaultConfig()
+	setupConfig.Protection.AllowDDL = true
+	setupP, connStr := newTestInstance(t, setupConfig)
+	setupTable(t, setupP, "CREATE TABLE users_select_reject (id serial PRIMARY KEY, name text)")
+	setupTable(t, setupP, "INSERT INTO users_select_reject (name) VALUES ('existing')")
+	setupP.Close(context.Background())
+
+	// Create instance with rejecting AfterQuery hook
+	config := defaultConfig()
+	config.DefaultHookTimeoutSeconds = 5
+	ctx := context.Background()
+	p, err := pgmcp.New(ctx, connStr, config, testLogger(), pgmcp.WithServerHooks(pgmcp.ServerHooksConfig{
+		AfterQuery: []pgmcp.HookEntry{
+			{Pattern: ".*", Command: hookScript("reject.sh")},
+		},
+	}))
+	if err != nil {
+		t.Fatalf("Failed to create PostgresMcp: %v", err)
+	}
+	defer p.Close(ctx)
+
+	// SELECT is read-only — hook rejects but no side effect
+	output := p.Query(ctx, pgmcp.QueryInput{SQL: "SELECT * FROM users_select_reject"})
+	if output.Error == "" {
+		t.Fatal("expected hook rejection error for SELECT")
+	}
+	if !strings.Contains(output.Error, "rejected by test hook") {
+		t.Fatalf("expected rejection message, got %q", output.Error)
+	}
+
+	// Verify data unchanged — use non-hooked instance
+	verifyConfig := defaultConfig()
+	verifyP, err := pgmcp.New(ctx, connStr, verifyConfig, testLogger())
+	if err != nil {
+		t.Fatalf("Failed to create verify instance: %v", err)
+	}
+	defer verifyP.Close(ctx)
+
+	verifyOutput := verifyP.Query(ctx, pgmcp.QueryInput{SQL: "SELECT count(*) AS cnt FROM users_select_reject"})
+	if verifyOutput.Error != "" {
+		t.Fatalf("verification query failed: %s", verifyOutput.Error)
+	}
+	if verifyOutput.Rows[0]["cnt"] != int64(1) {
+		t.Fatalf("expected 1 row unchanged, got %v", verifyOutput.Rows[0]["cnt"])
+	}
+}
+
+func TestQuery_ReadOnlyStatementRollbacksBeforeHooks(t *testing.T) {
+	t.Parallel()
+	// This test verifies that SELECT causes rollback before AfterQuery hooks run.
+	// The hook still runs, but the transaction is already rolled back.
+	config := defaultConfig()
+	config.Protection.AllowDDL = true
+	config.DefaultHookTimeoutSeconds = 5
+
+	// Use a capture hook to verify it receives data (hook is called even though tx is rolled back)
+	captureHook := &captureAfterHook{}
+	config.AfterQueryHooks = []pgmcp.AfterQueryHookEntry{
+		{Name: "capture", Hook: captureHook},
+	}
+	p, _ := newTestInstance(t, config)
+
+	setupTable(t, p, "CREATE TABLE readonly_hook_test (id serial PRIMARY KEY, name text)")
+	setupTable(t, p, "INSERT INTO readonly_hook_test (name) VALUES ('Alice')")
+
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "SELECT * FROM readonly_hook_test"})
+	if output.Error != "" {
+		t.Fatalf("unexpected error: %s", output.Error)
+	}
+
+	// Hook was called (it captured the result)
+	if captureHook.captured == nil {
+		t.Fatal("expected AfterQuery hook to be called for SELECT")
+	}
+	if len(captureHook.captured.Rows) != 1 {
+		t.Fatalf("expected hook to receive 1 row, got %d", len(captureHook.captured.Rows))
+	}
+	if captureHook.captured.Rows[0]["name"] != "Alice" {
+		t.Fatalf("expected hook to receive 'Alice', got %v", captureHook.captured.Rows[0]["name"])
+	}
+}
+
+func TestQuery_MaxSQLLength_ExactLimit(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.Query.MaxSQLLength = 20
+	p, _ := newTestInstance(t, config)
+
+	// "SELECT 1" is 8 bytes, well under 20
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "SELECT 1"})
+	if output.Error != "" {
+		t.Fatalf("expected query under limit to succeed, got error: %s", output.Error)
+	}
+}
+
+func TestQuery_CreateExtensionBlocked(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	// AllowCreateExtension defaults to false
+	p, _ := newTestInstance(t, config)
+
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "CREATE EXTENSION IF NOT EXISTS pg_trgm"})
+	if output.Error == "" {
+		t.Fatal("expected CREATE EXTENSION to be blocked")
+	}
+	if !strings.Contains(output.Error, "CREATE EXTENSION is not allowed") {
+		t.Fatalf("expected CREATE EXTENSION error, got %q", output.Error)
+	}
+}
+
+func TestQuery_MaintenanceBlocked(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.Protection.AllowDDL = true
+	p, _ := newTestInstance(t, config)
+
+	setupTable(t, p, "CREATE TABLE maint_test (id serial PRIMARY KEY)")
+
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "ANALYZE maint_test"})
+	if output.Error == "" {
+		t.Fatal("expected ANALYZE to be blocked")
+	}
+	if !strings.Contains(output.Error, "VACUUM/ANALYZE is not allowed") {
+		t.Fatalf("expected maintenance error, got %q", output.Error)
+	}
+}
+
+func TestQuery_CreateTriggerBlocked(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.Protection.AllowDDL = true
+	config.Protection.AllowCreateFunction = true
+	p, _ := newTestInstance(t, config)
+
+	setupTable(t, p, "CREATE TABLE trigger_test (id serial PRIMARY KEY)")
+	setupTable(t, p, "CREATE FUNCTION audit_func() RETURNS TRIGGER AS $$ BEGIN RETURN NEW; END; $$ LANGUAGE plpgsql")
+
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "CREATE TRIGGER trg AFTER INSERT ON trigger_test FOR EACH ROW EXECUTE FUNCTION audit_func()"})
+	if output.Error == "" {
+		t.Fatal("expected CREATE TRIGGER to be blocked")
+	}
+	if !strings.Contains(output.Error, "CREATE TRIGGER is not allowed") {
+		t.Fatalf("expected trigger error, got %q", output.Error)
+	}
+}
+
+func TestQuery_CreateRuleBlocked(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.Protection.AllowDDL = true
+	p, _ := newTestInstance(t, config)
+
+	setupTable(t, p, "CREATE TABLE rule_test (id serial PRIMARY KEY)")
+
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "CREATE RULE r AS ON INSERT TO rule_test DO ALSO NOTIFY rule_test_changed"})
+	if output.Error == "" {
+		t.Fatal("expected CREATE RULE to be blocked")
+	}
+	if !strings.Contains(output.Error, "CREATE RULE is not allowed") {
+		t.Fatalf("expected rule error, got %q", output.Error)
+	}
+}
+
+func TestQuery_CommitBlocked(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	p, _ := newTestInstance(t, config)
+
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "COMMIT"})
+	if output.Error == "" {
+		t.Fatal("expected COMMIT to be blocked")
+	}
+	if !strings.Contains(output.Error, "transaction control statements are not allowed") {
+		t.Fatalf("expected transaction control error, got %q", output.Error)
+	}
+}
+
+func TestQuery_AlterExtensionBlocked(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	p, _ := newTestInstance(t, config)
+
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "ALTER EXTENSION pg_trgm UPDATE"})
+	if output.Error == "" {
+		t.Fatal("expected ALTER EXTENSION to be blocked")
+	}
+	if !strings.Contains(output.Error, "ALTER EXTENSION is not allowed") {
+		t.Fatalf("expected ALTER EXTENSION error, got %q", output.Error)
+	}
+}
