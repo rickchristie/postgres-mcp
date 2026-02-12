@@ -139,36 +139,42 @@ Comprehensive comparison of the specification against the implemented code. Orga
 
 ---
 
-## 6. Missing Integration Tests — ListTables (Section 6.7, lines 3270-3284)
+## ~~6. Missing Integration Tests — ListTables (Section 6.7, lines 3270-3284)~~
 
 | # | Missing Test | Description |
 |---|---|---|
-| 1 | `TestListTables_SchemaAccessLimited` | Table with SELECT but no USAGE on schema, SchemaAccessLimited=true |
-| 2 | `TestListTables_SchemaAccessNormal` | Table in public schema, SchemaAccessLimited=false |
-| 3 | `TestListTables_Timeout` | Config with list_tables_timeout=1s, error contains deadline exceeded |
-| 4 | `TestListTables_AcquiresSemaphore` | max_conns=1, ListTables blocks on held semaphore |
-| 5 | `TestListTables_SemaphoreContention` | max_conns=1, short context timeout, error contains "failed to acquire query slot" |
+| ~~1~~ | ~~`TestListTables_SchemaAccessLimited`~~ | ~~Table with SELECT but no USAGE on schema, SchemaAccessLimited=true~~ |
+| ~~2~~ | ~~`TestListTables_SchemaAccessNormal`~~ | ~~Table in public schema, SchemaAccessLimited=false~~ |
+| ~~3~~ | ~~`TestListTables_Timeout`~~ | ~~Config with list_tables_timeout=1s, error contains deadline exceeded~~ |
+| ~~4~~ | ~~`TestListTables_AcquiresSemaphore`~~ | ~~max_conns=1, ListTables blocks on held semaphore~~ |
+| ~~5~~ | ~~`TestListTables_SemaphoreContention`~~ | ~~max_conns=1, short context timeout, error contains "failed to acquire query slot"~~ |
+
+**Fixed**: All 5 tests implemented in `listtables_test.go`.
 
 ---
 
-## 7. Missing Integration Tests — DescribeTable (Section 6.7, lines 3286-3310)
+## ~~7. Missing Integration Tests — DescribeTable (Section 6.7, lines 3286-3310)~~
 
 | # | Missing Test | Description |
 |---|---|---|
-| 1 | `TestDescribeTable_ForeignTable` | Foreign table support (type="foreign_table", columns listed) |
-| 2 | `TestDescribeTable_PartitionedTableList` | LIST partitioning, Partition.Strategy="list" |
-| 3 | `TestDescribeTable_PartitionedTableHash` | HASH partitioning, Partition.Strategy="hash" |
-| 4 | `TestDescribeTable_Timeout` | Config with describe_table_timeout=1s, error contains deadline exceeded |
-| 5 | `TestDescribeTable_AcquiresSemaphore` | max_conns=1, DescribeTable blocks on held semaphore |
-| 6 | `TestDescribeTable_SemaphoreContention` | max_conns=1, short context timeout, error contains "failed to acquire query slot" |
+| ~~1~~ | ~~`TestDescribeTable_ForeignTable`~~ | ~~Foreign table support (type="foreign_table", columns listed)~~ |
+| ~~2~~ | ~~`TestDescribeTable_PartitionedTableList`~~ | ~~LIST partitioning, Partition.Strategy="list"~~ |
+| ~~3~~ | ~~`TestDescribeTable_PartitionedTableHash`~~ | ~~HASH partitioning, Partition.Strategy="hash"~~ |
+| ~~4~~ | ~~`TestDescribeTable_Timeout`~~ | ~~Config with describe_table_timeout=1s, error contains deadline exceeded~~ |
+| ~~5~~ | ~~`TestDescribeTable_AcquiresSemaphore`~~ | ~~max_conns=1, DescribeTable blocks on held semaphore~~ |
+| ~~6~~ | ~~`TestDescribeTable_SemaphoreContention`~~ | ~~max_conns=1, short context timeout, error contains "failed to acquire query slot"~~ |
+
+**Fixed**: All 6 tests implemented in `describetable_test.go`.
 
 ---
 
-## 8. Missing Full Pipeline Test (Section 6.7, lines 3312-3316)
+## ~~8. Missing Full Pipeline Test (Section 6.7, lines 3312-3316)~~
 
 | # | Missing Test | Description |
 |---|---|---|
-| 1 | `TestFullPipeline` | End-to-end: BeforeQuery hook (modify) + protection + query + AfterQuery hook + sanitization + error prompts, all applied in correct order |
+| ~~1~~ | ~~`TestFullPipeline`~~ | ~~End-to-end: BeforeQuery hook (modify) + protection + query + AfterQuery hook + sanitization + error prompts, all applied in correct order~~ |
+
+**Fixed**: Implemented in `integration_test.go`.
 
 ---
 
@@ -209,9 +215,9 @@ The following areas have **zero gaps** between spec and implementation:
 | ~~Hook tests (Go unit)~~ | ~~7~~ |
 | ~~Integration tests — Query~~ | ~~22~~ |
 | ~~Integration tests — Go hooks~~ | ~~5~~ |
-| Integration tests — ListTables | 5 |
-| Integration tests — DescribeTable | 6 |
-| Full pipeline test | 1 |
-| **Total** | **43 items** (was 77, 7 Go hook unit tests fixed, 22 Query integration tests fixed, 5 Go hook integration tests fixed) |
+| ~~Integration tests — ListTables~~ | ~~5~~ |
+| ~~Integration tests — DescribeTable~~ | ~~6~~ |
+| ~~Full pipeline test~~ | ~~1~~ |
+| **Total** | **31 items** (was 77, 7 Go hook unit tests fixed, 22 Query integration tests fixed, 5 Go hook integration tests fixed, 5 ListTables tests fixed, 6 DescribeTable tests fixed, 1 full pipeline test fixed) |
 
 All production code (protection, hooks, sanitize, errprompt, timeout, query pipeline, convertValue, ListTables, DescribeTable, MCP bridge, config structs) matches the spec with zero functional gaps. The gaps are almost entirely in **test coverage** and the **unimplemented configure feature**.

@@ -1389,3 +1389,150 @@ func TestQuery_AlterExtensionBlocked(t *testing.T) {
 		t.Fatalf("expected ALTER EXTENSION error, got %q", output.Error)
 	}
 }
+
+// --- Full Pipeline Test ---
+
+// pipelineBeforeHook rewrites any query to SELECT id, name, phone FROM pipeline_test ORDER BY id.
+type pipelineBeforeHook struct{}
+
+func (h *pipelineBeforeHook) Run(_ context.Context, _ string) (string, error) {
+	return "SELECT id, name, phone FROM pipeline_test ORDER BY id", nil
+}
+
+// pipelineAfterHook adds a "hook_stage" column to every row.
+type pipelineAfterHook struct{}
+
+func (h *pipelineAfterHook) Run(_ context.Context, result *pgmcp.QueryOutput) (*pgmcp.QueryOutput, error) {
+	result.Columns = append(result.Columns, "hook_stage")
+	for _, row := range result.Rows {
+		row["hook_stage"] = "after_hook_applied"
+	}
+	return result, nil
+}
+
+func TestFullPipeline(t *testing.T) {
+	t.Parallel()
+
+	// First, create a plain instance (no hooks) to set up the test table.
+	setupConfig := defaultConfig()
+	setupConfig.Protection.AllowDDL = true
+	setupP, connStr := newTestInstance(t, setupConfig)
+
+	setupTable(t, setupP, "CREATE TABLE pipeline_test (id serial PRIMARY KEY, name text, phone text)")
+	setupTable(t, setupP, "INSERT INTO pipeline_test (name, phone) VALUES ('Alice', '555-123-4567'), ('Bob', '555-987-6543')")
+
+	// Now create the full pipeline instance with hooks, sanitization, and error prompts
+	// on the same database.
+	pipelineConfig := defaultConfig()
+	pipelineConfig.DefaultHookTimeoutSeconds = 10
+	pipelineConfig.BeforeQueryHooks = []pgmcp.BeforeQueryHookEntry{
+		{Name: "rewrite", Hook: &pipelineBeforeHook{}},
+	}
+	pipelineConfig.AfterQueryHooks = []pgmcp.AfterQueryHookEntry{
+		{Name: "add_column", Hook: &pipelineAfterHook{}},
+	}
+	pipelineConfig.Sanitization = []pgmcp.SanitizationRule{
+		{
+			Pattern:     `\d{3}-\d{3}-\d{4}`,
+			Replacement: "***-***-****",
+			Description: "mask phone numbers",
+		},
+	}
+	pipelineConfig.ErrorPrompts = []pgmcp.ErrorPromptRule{
+		{
+			Pattern: "does not exist",
+			Message: "The table may not exist. Try running ListTables first.",
+		},
+	}
+
+	ctx := context.Background()
+	p, err := pgmcp.New(ctx, connStr, pipelineConfig, testLogger())
+	if err != nil {
+		t.Fatalf("failed to create pipeline instance: %v", err)
+	}
+	defer p.Close(ctx)
+
+	// --- Test 1: Successful query through full pipeline ---
+	// Send a dummy query — BeforeQuery hook rewrites it to SELECT from pipeline_test.
+	output := p.Query(ctx, pgmcp.QueryInput{SQL: "SELECT 1"})
+	if output.Error != "" {
+		t.Fatalf("unexpected error: %s", output.Error)
+	}
+
+	// Verify AfterQuery hook added the "hook_stage" column
+	if len(output.Columns) != 4 {
+		t.Fatalf("expected 4 columns (id, name, phone, hook_stage), got %d: %v", len(output.Columns), output.Columns)
+	}
+	foundHookStage := false
+	for _, col := range output.Columns {
+		if col == "hook_stage" {
+			foundHookStage = true
+			break
+		}
+	}
+	if !foundHookStage {
+		t.Fatalf("expected 'hook_stage' column from AfterQuery hook, got columns: %v", output.Columns)
+	}
+
+	// Verify we got 2 rows
+	if len(output.Rows) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(output.Rows))
+	}
+
+	// Verify BeforeQuery hook rewrote the query (we get pipeline_test data, not "SELECT 1")
+	if output.Rows[0]["name"] != "Alice" {
+		t.Fatalf("expected 'Alice' in first row, got %v", output.Rows[0]["name"])
+	}
+	if output.Rows[1]["name"] != "Bob" {
+		t.Fatalf("expected 'Bob' in second row, got %v", output.Rows[1]["name"])
+	}
+
+	// Verify sanitization masked phone numbers
+	phone0, ok := output.Rows[0]["phone"].(string)
+	if !ok {
+		t.Fatalf("expected phone to be string, got %T", output.Rows[0]["phone"])
+	}
+	if phone0 != "***-***-****" {
+		t.Fatalf("expected phone masked as '***-***-****', got %q", phone0)
+	}
+	phone1, ok := output.Rows[1]["phone"].(string)
+	if !ok {
+		t.Fatalf("expected phone to be string, got %T", output.Rows[1]["phone"])
+	}
+	if phone1 != "***-***-****" {
+		t.Fatalf("expected phone masked as '***-***-****', got %q", phone1)
+	}
+
+	// Verify AfterQuery hook applied to rows
+	for i, row := range output.Rows {
+		if row["hook_stage"] != "after_hook_applied" {
+			t.Fatalf("row %d: expected hook_stage='after_hook_applied', got %v", i, row["hook_stage"])
+		}
+	}
+
+	// --- Test 2: Error prompts applied on failure ---
+	// Use the setup instance (no hooks) with error prompts to test error prompt matching.
+	errPromptConfig := defaultConfig()
+	errPromptConfig.ErrorPrompts = []pgmcp.ErrorPromptRule{
+		{
+			Pattern: "does not exist",
+			Message: "The table may not exist. Try running ListTables first.",
+		},
+	}
+	pErrPrompt, err := pgmcp.New(ctx, connStr, errPromptConfig, testLogger())
+	if err != nil {
+		t.Fatalf("failed to create error prompt instance: %v", err)
+	}
+	defer pErrPrompt.Close(ctx)
+
+	errOutput := pErrPrompt.Query(ctx, pgmcp.QueryInput{SQL: "SELECT * FROM nonexistent_table_xyz"})
+	if errOutput.Error == "" {
+		t.Fatal("expected error for nonexistent table")
+	}
+	if !strings.Contains(errOutput.Error, "does not exist") {
+		t.Fatalf("expected 'does not exist' in error, got %q", errOutput.Error)
+	}
+	if !strings.Contains(errOutput.Error, "The table may not exist. Try running ListTables first.") {
+		t.Fatalf("expected error prompt in error message, got %q", errOutput.Error)
+	}
+}

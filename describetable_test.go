@@ -6,11 +6,14 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/jackc/pgx/v5"
 	pgmcp "github.com/rickchristie/postgres-mcp"
 )
 
 func TestDescribeTable_Columns(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Protection.AllowDDL = true
 	p, _ := newTestInstance(t, config)
@@ -48,6 +51,7 @@ func TestDescribeTable_Columns(t *testing.T) {
 }
 
 func TestDescribeTable_PrimaryKey(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Protection.AllowDDL = true
 	p, _ := newTestInstance(t, config)
@@ -80,6 +84,7 @@ func TestDescribeTable_PrimaryKey(t *testing.T) {
 }
 
 func TestDescribeTable_Indexes(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Protection.AllowDDL = true
 	p, _ := newTestInstance(t, config)
@@ -108,6 +113,7 @@ func TestDescribeTable_Indexes(t *testing.T) {
 }
 
 func TestDescribeTable_ForeignKeys(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Protection.AllowDDL = true
 	p, _ := newTestInstance(t, config)
@@ -133,6 +139,7 @@ func TestDescribeTable_ForeignKeys(t *testing.T) {
 }
 
 func TestDescribeTable_UniqueConstraint(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Protection.AllowDDL = true
 	p, _ := newTestInstance(t, config)
@@ -157,6 +164,7 @@ func TestDescribeTable_UniqueConstraint(t *testing.T) {
 }
 
 func TestDescribeTable_CheckConstraint(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Protection.AllowDDL = true
 	p, _ := newTestInstance(t, config)
@@ -181,6 +189,7 @@ func TestDescribeTable_CheckConstraint(t *testing.T) {
 }
 
 func TestDescribeTable_DefaultValues(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Protection.AllowDDL = true
 	p, _ := newTestInstance(t, config)
@@ -203,6 +212,7 @@ func TestDescribeTable_DefaultValues(t *testing.T) {
 }
 
 func TestDescribeTable_NotFound(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	p, _ := newTestInstance(t, config)
 
@@ -216,6 +226,7 @@ func TestDescribeTable_NotFound(t *testing.T) {
 }
 
 func TestDescribeTable_View(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Protection.AllowDDL = true
 	p, _ := newTestInstance(t, config)
@@ -243,6 +254,7 @@ func TestDescribeTable_View(t *testing.T) {
 }
 
 func TestDescribeTable_MaterializedView(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Protection.AllowDDL = true
 	p, _ := newTestInstance(t, config)
@@ -266,6 +278,7 @@ func TestDescribeTable_MaterializedView(t *testing.T) {
 }
 
 func TestDescribeTable_MaterializedViewWithIndex(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Protection.AllowDDL = true
 	p, _ := newTestInstance(t, config)
@@ -295,6 +308,7 @@ func TestDescribeTable_MaterializedViewWithIndex(t *testing.T) {
 }
 
 func TestDescribeTable_PartitionedTable(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Protection.AllowDDL = true
 	p, _ := newTestInstance(t, config)
@@ -325,6 +339,7 @@ func TestDescribeTable_PartitionedTable(t *testing.T) {
 }
 
 func TestDescribeTable_ChildPartition(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Protection.AllowDDL = true
 	p, _ := newTestInstance(t, config)
@@ -348,6 +363,7 @@ func TestDescribeTable_ChildPartition(t *testing.T) {
 }
 
 func TestDescribeTable_DefaultSchemaPublic(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Protection.AllowDDL = true
 	p, _ := newTestInstance(t, config)
@@ -365,6 +381,7 @@ func TestDescribeTable_DefaultSchemaPublic(t *testing.T) {
 }
 
 func TestDescribeTable_SchemaQualified(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Protection.AllowDDL = true
 	p, _ := newTestInstance(t, config)
@@ -382,4 +399,211 @@ func TestDescribeTable_SchemaQualified(t *testing.T) {
 	if output.Name != "my_table" {
 		t.Fatalf("expected table 'my_table', got %q", output.Name)
 	}
+}
+
+func TestDescribeTable_ForeignTable(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.Protection.AllowDDL = true
+	config.Protection.AllowCreateExtension = true
+	p, _ := newTestInstance(t, config)
+
+	// Try to create file_fdw extension — skip if not available
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "CREATE EXTENSION IF NOT EXISTS file_fdw"})
+	if output.Error != "" {
+		t.Skipf("file_fdw extension not available: %s", output.Error)
+	}
+
+	setupTable(t, p, "CREATE SERVER ft_test_server FOREIGN DATA WRAPPER file_fdw")
+	setupTable(t, p, "CREATE FOREIGN TABLE ft_test_table (id integer, name text) SERVER ft_test_server OPTIONS (filename '/dev/null', format 'csv')")
+
+	descOutput, err := p.DescribeTable(context.Background(), pgmcp.DescribeTableInput{Table: "ft_test_table"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if descOutput.Type != "foreign_table" {
+		t.Fatalf("expected type 'foreign_table', got %q", descOutput.Type)
+	}
+	if len(descOutput.Columns) != 2 {
+		t.Fatalf("expected 2 columns, got %d", len(descOutput.Columns))
+	}
+
+	// Verify column names
+	colNames := map[string]bool{}
+	for _, col := range descOutput.Columns {
+		colNames[col.Name] = true
+	}
+	if !colNames["id"] || !colNames["name"] {
+		t.Fatalf("expected columns 'id' and 'name', got %v", descOutput.Columns)
+	}
+}
+
+func TestDescribeTable_PartitionedTableList(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.Protection.AllowDDL = true
+	p, _ := newTestInstance(t, config)
+
+	setupTable(t, p, "CREATE TABLE regions (id serial, region text NOT NULL) PARTITION BY LIST (region)")
+	setupTable(t, p, "CREATE TABLE regions_us PARTITION OF regions FOR VALUES IN ('us-east', 'us-west')")
+	setupTable(t, p, "CREATE TABLE regions_eu PARTITION OF regions FOR VALUES IN ('eu-west', 'eu-central')")
+
+	output, err := p.DescribeTable(context.Background(), pgmcp.DescribeTableInput{Table: "regions"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if output.Type != "partitioned_table" {
+		t.Fatalf("expected type 'partitioned_table', got %q", output.Type)
+	}
+	if output.Partition == nil {
+		t.Fatal("expected partition info")
+	}
+	if output.Partition.Strategy != "list" {
+		t.Fatalf("expected strategy 'list', got %q", output.Partition.Strategy)
+	}
+	if !strings.Contains(output.Partition.PartitionKey, "region") {
+		t.Fatalf("expected partition key to contain 'region', got %q", output.Partition.PartitionKey)
+	}
+	if len(output.Partition.Partitions) != 2 {
+		t.Fatalf("expected 2 child partitions, got %d", len(output.Partition.Partitions))
+	}
+}
+
+func TestDescribeTable_PartitionedTableHash(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.Protection.AllowDDL = true
+	p, _ := newTestInstance(t, config)
+
+	setupTable(t, p, "CREATE TABLE hash_data (id integer NOT NULL, val text) PARTITION BY HASH (id)")
+	setupTable(t, p, "CREATE TABLE hash_data_0 PARTITION OF hash_data FOR VALUES WITH (MODULUS 2, REMAINDER 0)")
+	setupTable(t, p, "CREATE TABLE hash_data_1 PARTITION OF hash_data FOR VALUES WITH (MODULUS 2, REMAINDER 1)")
+
+	output, err := p.DescribeTable(context.Background(), pgmcp.DescribeTableInput{Table: "hash_data"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if output.Type != "partitioned_table" {
+		t.Fatalf("expected type 'partitioned_table', got %q", output.Type)
+	}
+	if output.Partition == nil {
+		t.Fatal("expected partition info")
+	}
+	if output.Partition.Strategy != "hash" {
+		t.Fatalf("expected strategy 'hash', got %q", output.Partition.Strategy)
+	}
+	if !strings.Contains(output.Partition.PartitionKey, "id") {
+		t.Fatalf("expected partition key to contain 'id', got %q", output.Partition.PartitionKey)
+	}
+	if len(output.Partition.Partitions) != 2 {
+		t.Fatalf("expected 2 child partitions, got %d", len(output.Partition.Partitions))
+	}
+}
+
+func TestDescribeTable_Timeout(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.Protection.AllowDDL = true
+	config.Query.DescribeTableTimeoutSeconds = 1
+	p, connStr := newTestInstance(t, config)
+
+	setupTable(t, p, "CREATE TABLE dt_timeout_table (id serial PRIMARY KEY)")
+
+	// Hold an ACCESS EXCLUSIVE lock on the table from a separate connection.
+	// This blocks ::regclass resolution (which acquires AccessShareLock) in DescribeTable.
+	ctx := context.Background()
+	lockConn, err := pgx.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("failed to connect for lock: %v", err)
+	}
+	t.Cleanup(func() {
+		lockConn.Exec(ctx, "ROLLBACK")
+		lockConn.Close(ctx)
+	})
+
+	_, err = lockConn.Exec(ctx, "BEGIN")
+	if err != nil {
+		t.Fatalf("failed to begin lock transaction: %v", err)
+	}
+	_, err = lockConn.Exec(ctx, "LOCK TABLE dt_timeout_table IN ACCESS EXCLUSIVE MODE")
+	if err != nil {
+		t.Fatalf("failed to lock table: %v", err)
+	}
+
+	// DescribeTable should block on the lock and timeout after 1s
+	_, descErr := p.DescribeTable(ctx, pgmcp.DescribeTableInput{Table: "dt_timeout_table"})
+	if descErr == nil {
+		t.Fatal("expected timeout error")
+	}
+	errMsg := descErr.Error()
+	if !strings.Contains(errMsg, "context deadline exceeded") && !strings.Contains(errMsg, "canceling statement") {
+		t.Fatalf("expected deadline exceeded or canceling statement error, got %q", errMsg)
+	}
+}
+
+func TestDescribeTable_AcquiresSemaphore(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.Protection.AllowDDL = true
+	config.Pool.MaxConns = 1
+	config.Query.DefaultTimeoutSeconds = 30
+	p, _ := newTestInstance(t, config)
+
+	setupTable(t, p, "CREATE TABLE dt_sem_table (id serial PRIMARY KEY, name text)")
+
+	// Hold the semaphore with a slow query (2 seconds)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		p.Query(context.Background(), pgmcp.QueryInput{SQL: "SELECT pg_sleep(2)"})
+	}()
+
+	// Give the goroutine time to acquire the semaphore
+	time.Sleep(100 * time.Millisecond)
+
+	// DescribeTable should block until the slow query finishes, then succeed
+	output, err := p.DescribeTable(context.Background(), pgmcp.DescribeTableInput{Table: "dt_sem_table"})
+	if err != nil {
+		t.Fatalf("expected DescribeTable to succeed after semaphore released, got error: %v", err)
+	}
+	if output.Type != "table" {
+		t.Fatalf("expected type 'table', got %q", output.Type)
+	}
+
+	<-done
+}
+
+func TestDescribeTable_SemaphoreContention(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.Protection.AllowDDL = true
+	config.Pool.MaxConns = 1
+	config.Query.DefaultTimeoutSeconds = 30
+	p, _ := newTestInstance(t, config)
+
+	setupTable(t, p, "CREATE TABLE dt_contention_table (id serial PRIMARY KEY)")
+
+	// Hold the single semaphore slot with a slow query
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		p.Query(context.Background(), pgmcp.QueryInput{SQL: "SELECT pg_sleep(5)"})
+	}()
+
+	// Give the goroutine time to acquire the semaphore
+	time.Sleep(100 * time.Millisecond)
+
+	// DescribeTable with a short context timeout — should fail with semaphore contention
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	_, err := p.DescribeTable(ctx, pgmcp.DescribeTableInput{Table: "dt_contention_table"})
+	if err == nil {
+		t.Fatal("expected semaphore contention error")
+	}
+	if !strings.Contains(err.Error(), "failed to acquire query slot") {
+		t.Fatalf("expected 'failed to acquire query slot' in error, got %q", err.Error())
+	}
+
+	<-done
 }
