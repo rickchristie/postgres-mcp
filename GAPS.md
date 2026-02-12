@@ -32,49 +32,53 @@ Comprehensive comparison of the specification against the implemented code. Orga
 
 ---
 
-## 2. Missing Config Tests (Section 6.6, lines 2953-2984)
+## ~~2. Missing Config Tests (Section 6.6, lines 2953-2984)~~
 
-**None of the `TestLoadConfig*` tests exist.** This is the largest gap — 27 tests covering config loading, validation, defaults, and edge cases.
+~~**None of the `TestLoadConfig*` tests exist.** This is the largest gap — 27 tests covering config loading, validation, defaults, and edge cases.~~
 
 | # | Missing Test | Description |
 |---|---|---|
-| 1 | `TestLoadConfigValid` | Valid JSON config file parsed correctly |
-| 2 | `TestLoadConfigFromEnvPath` | `GOPGMCP_CONFIG_PATH` env var path used |
-| 3 | `TestLoadConfigMissing` | Missing config file returns error |
-| 4 | `TestLoadConfigInvalidJSON` | Malformed JSON returns error |
-| 5 | `TestLoadConfigInvalidRegex` | Invalid regex in rules panics |
-| 6 | `TestLoadConfigDefaults_MaxResultLength` | max_result_length defaults to 100000 |
-| 7 | `TestLoadConfigValidation_NoPort` | Missing server.port panics |
-| 8 | `TestLoadConfigValidation_ZeroMaxConns` | pool.max_conns=0 panics |
-| 9 | `TestLoadConfigValidation_ZeroDefaultTimeout` | default_timeout_seconds=0 panics |
-| 10 | `TestLoadConfigValidation_MissingDefaultTimeout` | Omitted default_timeout_seconds panics |
-| 11 | `TestLoadConfigValidation_ZeroListTablesTimeout` | list_tables_timeout_seconds=0 panics |
-| 12 | `TestLoadConfigValidation_ZeroDescribeTableTimeout` | describe_table_timeout_seconds=0 panics |
-| 13 | `TestLoadConfigValidation_NegativeTimeout` | Negative timeout panics |
-| 14 | `TestLoadConfigValidation_ZeroHookDefaultTimeout` | Hooks with default_hook_timeout=0 panics |
-| 15 | `TestLoadConfigValidation_MissingHookDefaultTimeout` | Hooks with omitted default_hook_timeout panics |
-| 16 | `TestLoadConfigValidation_HookDefaultTimeoutNotRequiredWithoutHooks` | No hooks, omitted timeout — no panic |
-| 17 | `TestLoadConfigValidation_HookTimeoutFallback` | Per-hook timeout=0 falls back to default |
-| 18 | `TestLoadConfigValidation_HealthCheckPathEmpty` | health_check_enabled=true with empty path panics |
-| 19 | `TestLoadConfigValidation_HealthCheckPathNotRequiredWhenDisabled` | health_check_enabled=false, empty path — no panic |
-| 20 | `TestLoadConfigDefaults_MaxSQLLength` | max_sql_length defaults to 100000 |
-| 21 | `TestLoadConfigProtectionDefaults` | All Allow* fields default to false |
-| 22 | `TestLoadConfigProtectionExplicitAllow` | allow_drop=true sets AllowDrop=true, others false |
-| 23 | `TestLoadConfigProtectionNewFields` | All new protection fields settable |
-| 24 | `TestLoadConfigSSLMode` | sslmode field parsed correctly |
-| 25 | `TestLoadConfigValidation_GoHooksAndCmdHooksMutuallyExclusive` | Both Go and cmd hooks panics |
-| 26 | `TestLoadConfigValidation_GoHooksRequireDefaultTimeout` | Go hooks with timeout=0 panics |
-| 27 | `TestLoadConfigValidation_GoHooksOnlyNoCmd` | Only Go hooks, no cmd — no panic |
+| ~~1~~ | ~~`TestLoadConfigValid`~~ | ~~Valid JSON config file parsed correctly~~ |
+| ~~2~~ | ~~`TestLoadConfigFromEnvPath`~~ | ~~`GOPGMCP_CONFIG_PATH` env var path used~~ |
+| ~~3~~ | ~~`TestLoadConfigMissing`~~ | ~~Missing config file returns error~~ |
+| ~~4~~ | ~~`TestLoadConfigInvalidJSON`~~ | ~~Malformed JSON returns error~~ |
+| ~~5~~ | ~~`TestLoadConfigInvalidRegex`~~ | ~~Invalid regex in rules panics~~ |
+| ~~6~~ | ~~`TestLoadConfigDefaults_MaxResultLength`~~ | ~~max_result_length defaults to 100000~~ |
+| ~~7~~ | ~~`TestLoadConfigValidation_NoPort`~~ | ~~Missing server.port panics~~ |
+| ~~8~~ | ~~`TestLoadConfigValidation_ZeroMaxConns`~~ | ~~pool.max_conns=0 panics~~ |
+| ~~9~~ | ~~`TestLoadConfigValidation_ZeroDefaultTimeout`~~ | ~~default_timeout_seconds=0 panics~~ |
+| ~~10~~ | ~~`TestLoadConfigValidation_MissingDefaultTimeout`~~ | ~~Omitted default_timeout_seconds panics~~ |
+| ~~11~~ | ~~`TestLoadConfigValidation_ZeroListTablesTimeout`~~ | ~~list_tables_timeout_seconds=0 panics~~ |
+| ~~12~~ | ~~`TestLoadConfigValidation_ZeroDescribeTableTimeout`~~ | ~~describe_table_timeout_seconds=0 panics~~ |
+| ~~13~~ | ~~`TestLoadConfigValidation_NegativeTimeout`~~ | ~~Negative timeout panics~~ |
+| ~~14~~ | ~~`TestLoadConfigValidation_ZeroHookDefaultTimeout`~~ | ~~Hooks with default_hook_timeout=0 panics~~ |
+| ~~15~~ | ~~`TestLoadConfigValidation_MissingHookDefaultTimeout`~~ | ~~Hooks with omitted default_hook_timeout panics~~ |
+| ~~16~~ | ~~`TestLoadConfigValidation_HookDefaultTimeoutNotRequiredWithoutHooks`~~ | ~~No hooks, omitted timeout — no panic~~ |
+| ~~17~~ | ~~`TestLoadConfigValidation_HookTimeoutFallback`~~ | ~~Per-hook timeout=0 falls back to default~~ |
+| ~~18~~ | ~~`TestLoadConfigValidation_HealthCheckPathEmpty`~~ | ~~health_check_enabled=true with empty path panics~~ |
+| ~~19~~ | ~~`TestLoadConfigValidation_HealthCheckPathNotRequiredWhenDisabled`~~ | ~~health_check_enabled=false, empty path — no panic~~ |
+| ~~20~~ | ~~`TestLoadConfigDefaults_MaxSQLLength`~~ | ~~max_sql_length defaults to 100000~~ |
+| ~~21~~ | ~~`TestLoadConfigProtectionDefaults`~~ | ~~All Allow* fields default to false~~ |
+| ~~22~~ | ~~`TestLoadConfigProtectionExplicitAllow`~~ | ~~allow_drop=true sets AllowDrop=true, others false~~ |
+| ~~23~~ | ~~`TestLoadConfigProtectionNewFields`~~ | ~~All new protection fields settable~~ |
+| ~~24~~ | ~~`TestLoadConfigSSLMode`~~ | ~~sslmode field parsed correctly~~ |
+| ~~25~~ | ~~`TestLoadConfigValidation_GoHooksAndCmdHooksMutuallyExclusive`~~ | ~~Both Go and cmd hooks panics~~ |
+| ~~26~~ | ~~`TestLoadConfigValidation_GoHooksRequireDefaultTimeout`~~ | ~~Go hooks with timeout=0 panics~~ |
+| ~~27~~ | ~~`TestLoadConfigValidation_GoHooksOnlyNoCmd`~~ | ~~Only Go hooks, no cmd — no panic~~ |
+
+**Fixed**: All 27 tests implemented across `config_test.go` (18 unit tests), `cmd/gopgmcp/serve_test.go` (7 unit tests), and `integration_test.go` (2 integration tests).
 
 ---
 
 ## 3. Missing Hook Tests
 
-### 3.1 Command Hook Tests (Section 6.3, lines 2880-2909)
+### ~~3.1 Command Hook Tests (Section 6.3, lines 2880-2909)~~
 
 | # | Missing Test | Description | File |
 |---|---|---|---|
-| 1 | `TestHookStdinInput` | Verify raw SQL passed as stdin to BeforeQuery hook | `internal/hooks/hooks_test.go` |
+| ~~1~~ | ~~`TestHookStdinInput`~~ | ~~Verify raw SQL passed as stdin to BeforeQuery hook~~ | ~~`internal/hooks/hooks_test.go`~~ |
+
+**Fixed**: Test implemented in `internal/hooks/hooks_test.go` with `testdata/hooks/echo_stdin.sh` script.
 
 ### ~~3.2 Go Hook Unit Tests (Section 6.3.1, lines 2911-2931)~~
 
@@ -209,15 +213,15 @@ The following areas have **zero gaps** between spec and implementation:
 
 | Category | Missing Items |
 |---|---|
-| Code/feature gaps | 3 (configure package, initialize logging, port validation) |
-| Config tests | 27 |
-| Hook tests (command) | 1 |
+| ~~Code/feature gaps~~ | ~~3 (configure package, initialize logging, port validation)~~ |
+| ~~Config tests~~ | ~~27~~ |
+| ~~Hook tests (command)~~ | ~~1~~ |
 | ~~Hook tests (Go unit)~~ | ~~7~~ |
 | ~~Integration tests — Query~~ | ~~22~~ |
 | ~~Integration tests — Go hooks~~ | ~~5~~ |
 | ~~Integration tests — ListTables~~ | ~~5~~ |
 | ~~Integration tests — DescribeTable~~ | ~~6~~ |
 | ~~Full pipeline test~~ | ~~1~~ |
-| **Total** | **31 items** (was 77, 7 Go hook unit tests fixed, 22 Query integration tests fixed, 5 Go hook integration tests fixed, 5 ListTables tests fixed, 6 DescribeTable tests fixed, 1 full pipeline test fixed) |
+| **Total** | **0 items remaining** (all 77 original gaps fixed) |
 
-All production code (protection, hooks, sanitize, errprompt, timeout, query pipeline, convertValue, ListTables, DescribeTable, MCP bridge, config structs) matches the spec with zero functional gaps. The gaps are almost entirely in **test coverage** and the **unimplemented configure feature**.
+All production code and all spec'd tests are fully implemented. Zero gaps remain between IMPLEMENTATION.md and the actual codebase.

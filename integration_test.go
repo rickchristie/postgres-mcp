@@ -1536,3 +1536,42 @@ func TestFullPipeline(t *testing.T) {
 		t.Fatalf("expected error prompt in error message, got %q", errOutput.Error)
 	}
 }
+
+// --- Config Defaults Tests ---
+
+func TestLoadConfigDefaults_MaxResultLength(t *testing.T) {
+	t.Parallel()
+	// Config with MaxResultLength omitted (0) — should default to 100000.
+	config := defaultConfig()
+	config.Query.MaxResultLength = 0
+	p, _ := newTestInstance(t, config)
+
+	// A simple query should succeed — the default (100000) is applied, not 0.
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "SELECT 'hello' AS greeting"})
+	if output.Error != "" {
+		t.Fatalf("unexpected error with default max_result_length: %s", output.Error)
+	}
+	if len(output.Rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(output.Rows))
+	}
+	if output.Rows[0]["greeting"] != "hello" {
+		t.Fatalf("expected 'hello', got %v", output.Rows[0]["greeting"])
+	}
+}
+
+func TestLoadConfigDefaults_MaxSQLLength(t *testing.T) {
+	t.Parallel()
+	// Config with MaxSQLLength omitted (0) — should default to 100000.
+	config := defaultConfig()
+	config.Query.MaxSQLLength = 0
+	p, _ := newTestInstance(t, config)
+
+	// A normal-length query should succeed — the default (100000) is applied, not 0.
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "SELECT 1 AS num"})
+	if output.Error != "" {
+		t.Fatalf("unexpected error with default max_sql_length: %s", output.Error)
+	}
+	if len(output.Rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(output.Rows))
+	}
+}

@@ -303,6 +303,24 @@ func TestAfterQuery_UnparseableResponse(t *testing.T) {
 
 // --- Hook Input / Args Tests ---
 
+func TestHookStdinInput(t *testing.T) {
+	t.Parallel()
+	r := NewRunner(Config{
+		DefaultTimeout: 5 * time.Second,
+		BeforeQuery: []HookEntry{
+			{Pattern: ".*", Command: hookScript("echo_stdin.sh")},
+		},
+	}, testLogger())
+
+	result, err := r.RunBeforeQuery(context.Background(), "SELECT * FROM users WHERE id = 42")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != "STDIN: SELECT * FROM users WHERE id = 42" {
+		t.Fatalf("expected raw SQL as stdin, got %q", result)
+	}
+}
+
 func TestHookWithArgs(t *testing.T) {
 	r := NewRunner(Config{
 		DefaultTimeout: 5 * time.Second,
