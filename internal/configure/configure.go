@@ -22,11 +22,15 @@ func Run(configPath string) error {
 
 func run(configPath string, input io.Reader, output io.Writer) error {
 	scanner := bufio.NewScanner(input)
-	cfg := loadExisting(configPath)
+	cfg, isNew := loadExisting(configPath)
+	if isNew {
+		applyDefaults(cfg)
+	}
 
 	p := &prompter{
 		scanner: scanner,
 		output:  output,
+		isNew:   isNew,
 	}
 
 	fmt.Fprintf(output, "gopgmcp configuration wizard\n")
@@ -37,7 +41,7 @@ func run(configPath string, input io.Reader, output io.Writer) error {
 	cfg.Connection.Host = p.promptString("connection.host", cfg.Connection.Host)
 	cfg.Connection.Port = p.promptInt("connection.port", cfg.Connection.Port)
 	cfg.Connection.DBName = p.promptString("connection.dbname", cfg.Connection.DBName)
-	cfg.Connection.SSLMode = p.promptString("connection.sslmode", cfg.Connection.SSLMode)
+	cfg.Connection.SSLMode = p.promptEnum("connection.sslmode", cfg.Connection.SSLMode, sslModes)
 
 	// Server
 	fmt.Fprintf(output, "\n=== Server ===\n")
@@ -47,8 +51,8 @@ func run(configPath string, input io.Reader, output io.Writer) error {
 
 	// Logging
 	fmt.Fprintf(output, "\n=== Logging ===\n")
-	cfg.Logging.Level = p.promptString("logging.level", cfg.Logging.Level)
-	cfg.Logging.Format = p.promptString("logging.format", cfg.Logging.Format)
+	cfg.Logging.Level = p.promptEnum("logging.level", cfg.Logging.Level, logLevels)
+	cfg.Logging.Format = p.promptEnum("logging.format", cfg.Logging.Format, logFormats)
 	cfg.Logging.Output = p.promptString("logging.output", cfg.Logging.Output)
 
 	// Pool
@@ -124,16 +128,39 @@ func run(configPath string, input io.Reader, output io.Writer) error {
 	return nil
 }
 
-func loadExisting(configPath string) *pgmcp.ServerConfig {
+func loadExisting(configPath string) (*pgmcp.ServerConfig, bool) {
 	cfg := &pgmcp.ServerConfig{}
 	data, err := os.ReadFile(configPath)
 	if err != nil {
-		return cfg
+		return cfg, true
 	}
 	// Ignore unmarshal errors — start with whatever was parseable.
 	_ = json.Unmarshal(data, cfg)
-	return cfg
+	return cfg, false
 }
+
+// applyDefaults sets sensible default values for a new configuration.
+func applyDefaults(cfg *pgmcp.ServerConfig) {
+	cfg.Connection.Host = "localhost"
+	cfg.Connection.Port = 5432
+	cfg.Connection.SSLMode = "prefer"
+	cfg.Server.Port = 8080
+	cfg.Logging.Level = "info"
+	cfg.Logging.Format = "json"
+	cfg.Logging.Output = "stderr"
+	cfg.Pool.MaxConns = 5
+	cfg.Query.DefaultTimeoutSeconds = 30
+	cfg.Query.ListTablesTimeoutSeconds = 10
+	cfg.Query.DescribeTableTimeoutSeconds = 10
+	cfg.Query.MaxSQLLength = 100000
+	cfg.Query.MaxResultLength = 100000
+}
+
+var (
+	sslModes  = []string{"disable", "allow", "prefer", "require", "verify-ca", "verify-full"}
+	logLevels = []string{"debug", "info", "warn", "error"}
+	logFormats = []string{"json", "text"}
+)
 
 func writeConfig(configPath string, cfg *pgmcp.ServerConfig) error {
 	dir := filepath.Dir(configPath)
@@ -160,6 +187,7 @@ func writeConfig(configPath string, cfg *pgmcp.ServerConfig) error {
 type prompter struct {
 	scanner *bufio.Scanner
 	output  io.Writer
+	isNew   bool
 }
 
 func (p *prompter) readLine() string {
@@ -169,8 +197,15 @@ func (p *prompter) readLine() string {
 	return ""
 }
 
+func (p *prompter) valueLabel() string {
+	if p.isNew {
+		return "default"
+	}
+	return "current"
+}
+
 func (p *prompter) promptString(field string, current string) string {
-	fmt.Fprintf(p.output, "%s (current: %q): ", field, current)
+	fmt.Fprintf(p.output, "%s (%s: %q): ", field, p.valueLabel(), current)
 	input := p.readLine()
 	if input == "" {
 		return current
@@ -179,7 +214,7 @@ func (p *prompter) promptString(field string, current string) string {
 }
 
 func (p *prompter) promptInt(field string, current int) int {
-	fmt.Fprintf(p.output, "%s (current: %d): ", field, current)
+	fmt.Fprintf(p.output, "%s (%s: %d): ", field, p.valueLabel(), current)
 	input := p.readLine()
 	if input == "" {
 		return current
@@ -193,7 +228,7 @@ func (p *prompter) promptInt(field string, current int) int {
 }
 
 func (p *prompter) promptBool(field string, current bool) bool {
-	fmt.Fprintf(p.output, "%s (current: %v): ", field, current)
+	fmt.Fprintf(p.output, "%s (%s: %v): ", field, p.valueLabel(), current)
 	input := p.readLine()
 	if input == "" {
 		return current
@@ -206,6 +241,22 @@ func (p *prompter) promptBool(field string, current bool) bool {
 	default:
 		fmt.Fprintf(p.output, "  Invalid boolean, keeping current value.\n")
 		return current
+	}
+}
+
+func (p *prompter) promptEnum(field string, current string, allowed []string) string {
+	for {
+		fmt.Fprintf(p.output, "%s (%s: %q, options: %s): ", field, p.valueLabel(), current, strings.Join(allowed, ", "))
+		input := p.readLine()
+		if input == "" {
+			return current
+		}
+		for _, v := range allowed {
+			if input == v {
+				return input
+			}
+		}
+		fmt.Fprintf(p.output, "  Invalid value %q, must be one of: %s\n", input, strings.Join(allowed, ", "))
 	}
 }
 

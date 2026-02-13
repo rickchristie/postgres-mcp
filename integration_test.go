@@ -17,6 +17,7 @@ import (
 // --- Query Tool Integration Tests ---
 
 func TestQuery_SelectBasic(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Protection.AllowDDL = true
 	p, _ := newTestInstance(t, config)
@@ -43,6 +44,7 @@ func TestQuery_SelectBasic(t *testing.T) {
 }
 
 func TestQuery_Insert(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Protection.AllowDDL = true
 	p, _ := newTestInstance(t, config)
@@ -65,6 +67,7 @@ func TestQuery_Insert(t *testing.T) {
 }
 
 func TestQuery_Update(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Protection.AllowDDL = true
 	p, _ := newTestInstance(t, config)
@@ -82,6 +85,7 @@ func TestQuery_Update(t *testing.T) {
 }
 
 func TestQuery_Delete(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Protection.AllowDDL = true
 	p, _ := newTestInstance(t, config)
@@ -99,6 +103,7 @@ func TestQuery_Delete(t *testing.T) {
 }
 
 func TestQuery_EmptyResult(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Protection.AllowDDL = true
 	p, _ := newTestInstance(t, config)
@@ -123,6 +128,7 @@ func TestQuery_EmptyResult(t *testing.T) {
 }
 
 func TestQuery_NullValues(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Protection.AllowDDL = true
 	p, _ := newTestInstance(t, config)
@@ -140,6 +146,7 @@ func TestQuery_NullValues(t *testing.T) {
 }
 
 func TestQuery_UUIDColumn(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Protection.AllowDDL = true
 	config.Protection.AllowCreateExtension = true
@@ -164,6 +171,7 @@ func TestQuery_UUIDColumn(t *testing.T) {
 }
 
 func TestQuery_TimestampColumn(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Protection.AllowDDL = true
 	p, _ := newTestInstance(t, config)
@@ -186,6 +194,7 @@ func TestQuery_TimestampColumn(t *testing.T) {
 }
 
 func TestQuery_NumericColumn(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Protection.AllowDDL = true
 	p, _ := newTestInstance(t, config)
@@ -207,6 +216,7 @@ func TestQuery_NumericColumn(t *testing.T) {
 }
 
 func TestQuery_BigIntColumn(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Protection.AllowDDL = true
 	p, _ := newTestInstance(t, config)
@@ -226,6 +236,7 @@ func TestQuery_BigIntColumn(t *testing.T) {
 }
 
 func TestQuery_ByteaColumn(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Protection.AllowDDL = true
 	p, _ := newTestInstance(t, config)
@@ -247,6 +258,7 @@ func TestQuery_ByteaColumn(t *testing.T) {
 }
 
 func TestQuery_SelectJSONB(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Protection.AllowDDL = true
 	p, _ := newTestInstance(t, config)
@@ -268,6 +280,7 @@ func TestQuery_SelectJSONB(t *testing.T) {
 }
 
 func TestQuery_SelectArray(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Protection.AllowDDL = true
 	p, _ := newTestInstance(t, config)
@@ -289,6 +302,7 @@ func TestQuery_SelectArray(t *testing.T) {
 }
 
 func TestQuery_SelectCTE(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Protection.AllowDDL = true
 	p, _ := newTestInstance(t, config)
@@ -306,6 +320,7 @@ func TestQuery_SelectCTE(t *testing.T) {
 }
 
 func TestQuery_Timeout(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Query.DefaultTimeoutSeconds = 1
 	p, _ := newTestInstance(t, config)
@@ -320,6 +335,7 @@ func TestQuery_Timeout(t *testing.T) {
 }
 
 func TestQuery_ProtectionEndToEnd(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	p, _ := newTestInstance(t, config)
 
@@ -333,6 +349,7 @@ func TestQuery_ProtectionEndToEnd(t *testing.T) {
 }
 
 func TestQuery_SanitizationEndToEnd(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Protection.AllowDDL = true
 	config.Sanitization = []pgmcp.SanitizationRule{
@@ -354,6 +371,7 @@ func TestQuery_SanitizationEndToEnd(t *testing.T) {
 }
 
 func TestQuery_ErrorPromptEndToEnd(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.ErrorPrompts = []pgmcp.ErrorPromptRule{
 		{Pattern: "does not exist", Message: "The table you referenced does not exist. Try list_tables to see available tables."},
@@ -373,6 +391,7 @@ func TestQuery_ErrorPromptEndToEnd(t *testing.T) {
 }
 
 func TestQuery_MaxResultLength(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Protection.AllowDDL = true
 	config.Query.MaxResultLength = 100 // very small limit
@@ -393,6 +412,7 @@ func TestQuery_MaxResultLength(t *testing.T) {
 }
 
 func TestQuery_ReadOnlyMode(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Protection.AllowDDL = true
 	config.ReadOnly = true
@@ -412,6 +432,7 @@ func TestQuery_ReadOnlyMode(t *testing.T) {
 }
 
 func TestQuery_ReadOnlyModeBlocksSetBypass(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.ReadOnly = true
 	config.Protection.AllowSet = true // allow SET in general
@@ -427,6 +448,7 @@ func TestQuery_ReadOnlyModeBlocksSetBypass(t *testing.T) {
 }
 
 func TestQuery_Timezone(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Timezone = "America/New_York"
 	p, _ := newTestInstance(t, config)
@@ -442,6 +464,7 @@ func TestQuery_Timezone(t *testing.T) {
 }
 
 func TestQuery_TimezoneUTC(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Timezone = "UTC"
 	p, _ := newTestInstance(t, config)
@@ -457,6 +480,7 @@ func TestQuery_TimezoneUTC(t *testing.T) {
 }
 
 func TestQuery_MaxSQLLength(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Query.MaxSQLLength = 100
 	p, _ := newTestInstance(t, config)
@@ -472,6 +496,7 @@ func TestQuery_MaxSQLLength(t *testing.T) {
 }
 
 func TestQuery_DDLBlocked(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	p, _ := newTestInstance(t, config)
 
@@ -485,6 +510,7 @@ func TestQuery_DDLBlocked(t *testing.T) {
 }
 
 func TestQuery_DDLAllowed(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Protection.AllowDDL = true
 	p, _ := newTestInstance(t, config)
@@ -496,6 +522,7 @@ func TestQuery_DDLAllowed(t *testing.T) {
 }
 
 func TestQuery_TransactionControlBlocked(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	p, _ := newTestInstance(t, config)
 
@@ -511,6 +538,7 @@ func TestQuery_TransactionControlBlocked(t *testing.T) {
 }
 
 func TestQuery_RowsAffected_Insert(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Protection.AllowDDL = true
 	p, _ := newTestInstance(t, config)
@@ -527,6 +555,7 @@ func TestQuery_RowsAffected_Insert(t *testing.T) {
 }
 
 func TestQuery_RowsAffected_Update(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Protection.AllowDDL = true
 	p, _ := newTestInstance(t, config)
@@ -548,6 +577,7 @@ func TestQuery_RowsAffected_Update(t *testing.T) {
 }
 
 func TestQuery_RowsAffected_Delete(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Protection.AllowDDL = true
 	p, _ := newTestInstance(t, config)
@@ -569,6 +599,7 @@ func TestQuery_RowsAffected_Delete(t *testing.T) {
 }
 
 func TestQuery_SemaphoreContention(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Pool.MaxConns = 1
 	config.Query.DefaultTimeoutSeconds = 30
@@ -600,6 +631,7 @@ func TestQuery_SemaphoreContention(t *testing.T) {
 }
 
 func TestQuery_AfterHookRejectRollbacksWrite(t *testing.T) {
+	t.Parallel()
 	// Create table with a non-hooked instance first
 	setupConfig := defaultConfig()
 	setupConfig.Protection.AllowDDL = true
@@ -649,6 +681,7 @@ func TestQuery_AfterHookRejectRollbacksWrite(t *testing.T) {
 }
 
 func TestQuery_AfterHookAcceptCommitsWrite(t *testing.T) {
+	t.Parallel()
 	// Create table with a non-hooked instance first
 	setupConfig := defaultConfig()
 	setupConfig.Protection.AllowDDL = true
@@ -694,6 +727,7 @@ func TestQuery_AfterHookAcceptCommitsWrite(t *testing.T) {
 }
 
 func TestQuery_HookCrashStopsPipeline(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.DefaultHookTimeoutSeconds = 5
 
@@ -713,6 +747,7 @@ func TestQuery_HookCrashStopsPipeline(t *testing.T) {
 }
 
 func TestQuery_HookBadJsonStopsPipeline(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.DefaultHookTimeoutSeconds = 5
 
@@ -732,6 +767,7 @@ func TestQuery_HookBadJsonStopsPipeline(t *testing.T) {
 }
 
 func TestQuery_ExplainAnalyzeProtection(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Protection.AllowDDL = true
 	p, _ := newTestInstance(t, config)
@@ -748,6 +784,7 @@ func TestQuery_ExplainAnalyzeProtection(t *testing.T) {
 }
 
 func TestQuery_UTF8Truncation(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Protection.AllowDDL = true
 	config.Query.MaxResultLength = 50 // very small
@@ -773,6 +810,7 @@ func TestQuery_UTF8Truncation(t *testing.T) {
 }
 
 func TestQuery_TimeoutRuleMatch(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Query.DefaultTimeoutSeconds = 30
 	config.Query.TimeoutRules = []pgmcp.TimeoutRule{
@@ -788,6 +826,7 @@ func TestQuery_TimeoutRuleMatch(t *testing.T) {
 }
 
 func TestQuery_InetColumn(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Protection.AllowDDL = true
 	p, _ := newTestInstance(t, config)

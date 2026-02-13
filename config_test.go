@@ -145,6 +145,26 @@ func TestLoadConfigValidation_NegativeTimeout(t *testing.T) {
 	})
 }
 
+func TestLoadConfigValidation_NegativeListTablesTimeout(t *testing.T) {
+	t.Parallel()
+	config := validConfig()
+	config.Query.ListTablesTimeoutSeconds = -1
+
+	expectPanic(t, "list_tables_timeout_seconds", func() {
+		pgmcp.New(context.Background(), dummyConnString, config, configTestLogger())
+	})
+}
+
+func TestLoadConfigValidation_NegativeDescribeTableTimeout(t *testing.T) {
+	t.Parallel()
+	config := validConfig()
+	config.Query.DescribeTableTimeoutSeconds = -1
+
+	expectPanic(t, "describe_table_timeout_seconds", func() {
+		pgmcp.New(context.Background(), dummyConnString, config, configTestLogger())
+	})
+}
+
 func TestLoadConfigValidation_ZeroHookDefaultTimeout(t *testing.T) {
 	t.Parallel()
 	config := validConfig()

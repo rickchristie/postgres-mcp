@@ -68,6 +68,27 @@ func (h *mockSlowBeforeHook) Run(ctx context.Context, query string) (string, err
 	}
 }
 
+// mockRejectAfterHook always returns an error.
+type mockRejectAfterHook struct{}
+
+func (h *mockRejectAfterHook) Run(_ context.Context, _ *QueryOutput) (*QueryOutput, error) {
+	return nil, fmt.Errorf("result rejected")
+}
+
+// mockSlowAfterHook sleeps until context is cancelled or duration elapses.
+type mockSlowAfterHook struct {
+	sleepDuration time.Duration
+}
+
+func (h *mockSlowAfterHook) Run(ctx context.Context, result *QueryOutput) (*QueryOutput, error) {
+	select {
+	case <-time.After(h.sleepDuration):
+		return result, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
 // mockPassthroughAfterHook returns the result unchanged.
 type mockPassthroughAfterHook struct{}
 
@@ -142,6 +163,7 @@ func newUnitTestInstance(beforeHooks []BeforeQueryHookEntry, afterHooks []AfterQ
 // --- Before hooks unit tests ---
 
 func TestGoBeforeHooks_Chaining(t *testing.T) {
+	t.Parallel()
 	captureHook := &mockCaptureBeforeHook{}
 	p := newUnitTestInstance(
 		[]BeforeQueryHookEntry{
@@ -168,6 +190,7 @@ func TestGoBeforeHooks_Chaining(t *testing.T) {
 }
 
 func TestGoBeforeHooks_ChainStopsOnReject(t *testing.T) {
+	t.Parallel()
 	neverCalled := &mockNeverCalledBeforeHook{}
 	p := newUnitTestInstance(
 		[]BeforeQueryHookEntry{
@@ -192,6 +215,7 @@ func TestGoBeforeHooks_ChainStopsOnReject(t *testing.T) {
 }
 
 func TestGoBeforeHooks_PerHookTimeoutOverridesDefault(t *testing.T) {
+	t.Parallel()
 	p := newUnitTestInstance(
 		[]BeforeQueryHookEntry{
 			{
@@ -214,6 +238,7 @@ func TestGoBeforeHooks_PerHookTimeoutOverridesDefault(t *testing.T) {
 }
 
 func TestGoBeforeHooks_Empty(t *testing.T) {
+	t.Parallel()
 	p := newUnitTestInstance(nil, nil, 5)
 
 	result, err := p.runGoBeforeHooks(context.Background(), "SELECT 1")
@@ -228,6 +253,7 @@ func TestGoBeforeHooks_Empty(t *testing.T) {
 // --- After hooks unit tests ---
 
 func TestGoAfterHooks_Chaining(t *testing.T) {
+	t.Parallel()
 	captureHook := &mockCaptureAfterHook{}
 	p := newUnitTestInstance(
 		nil,
@@ -280,6 +306,7 @@ func TestGoAfterHooks_Chaining(t *testing.T) {
 }
 
 func TestGoAfterHooks_Empty(t *testing.T) {
+	t.Parallel()
 	p := newUnitTestInstance(nil, nil, 5)
 
 	input := &QueryOutput{
@@ -315,6 +342,7 @@ func TestGoAfterHooks_Empty(t *testing.T) {
 }
 
 func TestGoAfterHooks_PreservesTypes(t *testing.T) {
+	t.Parallel()
 	typeChecker := &mockTypeAssertAfterHook{}
 	p := newUnitTestInstance(
 		nil,
@@ -370,5 +398,216 @@ func TestGoAfterHooks_PreservesTypes(t *testing.T) {
 
 	if result.RowsAffected != 1 {
 		t.Fatalf("expected RowsAffected=1, got %d", result.RowsAffected)
+	}
+}
+
+// --- Missing tests from IMPLEMENTATION.md section 6.3.1 ---
+
+func TestGoBeforeHooks_PassThrough(t *testing.T) {
+	t.Parallel()
+	p := newUnitTestInstance(
+		[]BeforeQueryHookEntry{
+			{Name: "passthrough", Hook: &mockPassthroughBeforeHook{}},
+		},
+		nil,
+		5,
+	)
+
+	result, err := p.runGoBeforeHooks(context.Background(), "SELECT 1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != "SELECT 1" {
+		t.Fatalf("expected 'SELECT 1', got %q", result)
+	}
+}
+
+func TestGoBeforeHooks_Reject(t *testing.T) {
+	t.Parallel()
+	p := newUnitTestInstance(
+		[]BeforeQueryHookEntry{
+			{Name: "rejector", Hook: &mockRejectBeforeHook{}},
+		},
+		nil,
+		5,
+	)
+
+	_, err := p.runGoBeforeHooks(context.Background(), "SELECT 1")
+	if err == nil {
+		t.Fatal("expected error from rejecting hook")
+	}
+	expected := `before_query hook error: hook rejected query (name: rejector): blocked`
+	if err.Error() != expected {
+		t.Fatalf("expected error %q, got %q", expected, err.Error())
+	}
+}
+
+func TestGoBeforeHooks_ModifyQuery(t *testing.T) {
+	t.Parallel()
+	p := newUnitTestInstance(
+		[]BeforeQueryHookEntry{
+			{Name: "modifier", Hook: &mockModifyBeforeHook{replacement: "SELECT 2"}},
+		},
+		nil,
+		5,
+	)
+
+	result, err := p.runGoBeforeHooks(context.Background(), "SELECT 1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != "SELECT 2" {
+		t.Fatalf("expected 'SELECT 2', got %q", result)
+	}
+}
+
+func TestGoBeforeHooks_Timeout(t *testing.T) {
+	t.Parallel()
+	p := newUnitTestInstance(
+		[]BeforeQueryHookEntry{
+			{Name: "slow", Timeout: 1 * time.Second, Hook: &mockSlowBeforeHook{sleepDuration: 2 * time.Second}},
+		},
+		nil,
+		5,
+	)
+
+	_, err := p.runGoBeforeHooks(context.Background(), "SELECT 1")
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	expected := `before_query hook error: hook timed out (name: slow, timeout: 1s)`
+	if err.Error() != expected {
+		t.Fatalf("expected error %q, got %q", expected, err.Error())
+	}
+}
+
+func TestGoAfterHooks_PassThrough(t *testing.T) {
+	t.Parallel()
+	p := newUnitTestInstance(
+		nil,
+		[]AfterQueryHookEntry{
+			{Name: "passthrough", Hook: &mockPassthroughAfterHook{}},
+		},
+		5,
+	)
+
+	input := &QueryOutput{
+		Columns: []string{"val"},
+		Rows: []map[string]interface{}{
+			{"val": int32(42)},
+		},
+		RowsAffected: 1,
+	}
+
+	result, err := p.runGoAfterHooks(context.Background(), input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != input {
+		t.Fatal("expected same pointer returned for passthrough hook")
+	}
+	if len(result.Columns) != 1 {
+		t.Fatalf("expected 1 column, got %d", len(result.Columns))
+	}
+	if result.Columns[0] != "val" {
+		t.Fatalf("expected column 'val', got %q", result.Columns[0])
+	}
+	if len(result.Rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(result.Rows))
+	}
+	if result.Rows[0]["val"] != int32(42) {
+		t.Fatalf("expected val=42 (int32), got %v (%T)", result.Rows[0]["val"], result.Rows[0]["val"])
+	}
+	if result.RowsAffected != 1 {
+		t.Fatalf("expected RowsAffected=1, got %d", result.RowsAffected)
+	}
+}
+
+func TestGoAfterHooks_Reject(t *testing.T) {
+	t.Parallel()
+	p := newUnitTestInstance(
+		nil,
+		[]AfterQueryHookEntry{
+			{Name: "rejector", Hook: &mockRejectAfterHook{}},
+		},
+		5,
+	)
+
+	input := &QueryOutput{
+		Columns: []string{"val"},
+		Rows: []map[string]interface{}{
+			{"val": int32(1)},
+		},
+	}
+
+	_, err := p.runGoAfterHooks(context.Background(), input)
+	if err == nil {
+		t.Fatal("expected error from rejecting hook")
+	}
+	expected := `after_query hook error: hook rejected result (name: rejector): result rejected`
+	if err.Error() != expected {
+		t.Fatalf("expected error %q, got %q", expected, err.Error())
+	}
+}
+
+func TestGoAfterHooks_ModifyResult(t *testing.T) {
+	t.Parallel()
+	p := newUnitTestInstance(
+		nil,
+		[]AfterQueryHookEntry{
+			{Name: "enricher", Hook: &mockAddColumnAfterHook{}},
+		},
+		5,
+	)
+
+	input := &QueryOutput{
+		Columns: []string{"val"},
+		Rows: []map[string]interface{}{
+			{"val": int32(1)},
+		},
+	}
+
+	result, err := p.runGoAfterHooks(context.Background(), input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Columns) != 2 {
+		t.Fatalf("expected 2 columns, got %d: %v", len(result.Columns), result.Columns)
+	}
+	if result.Columns[0] != "val" {
+		t.Fatalf("expected first column 'val', got %q", result.Columns[0])
+	}
+	if result.Columns[1] != "hook_added" {
+		t.Fatalf("expected second column 'hook_added', got %q", result.Columns[1])
+	}
+	if result.Rows[0]["hook_added"] != "injected" {
+		t.Fatalf("expected 'injected', got %v", result.Rows[0]["hook_added"])
+	}
+}
+
+func TestGoAfterHooks_Timeout(t *testing.T) {
+	t.Parallel()
+	p := newUnitTestInstance(
+		nil,
+		[]AfterQueryHookEntry{
+			{Name: "slow", Timeout: 1 * time.Second, Hook: &mockSlowAfterHook{sleepDuration: 2 * time.Second}},
+		},
+		5,
+	)
+
+	input := &QueryOutput{
+		Columns: []string{"val"},
+		Rows: []map[string]interface{}{
+			{"val": int32(1)},
+		},
+	}
+
+	_, err := p.runGoAfterHooks(context.Background(), input)
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	expected := `after_query hook error: hook timed out (name: slow, timeout: 1s)`
+	if err.Error() != expected {
+		t.Fatalf("expected error %q, got %q", expected, err.Error())
 	}
 }

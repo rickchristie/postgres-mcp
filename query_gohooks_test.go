@@ -103,6 +103,7 @@ func (h *captureAfterHook) Run(_ context.Context, result *pgmcp.QueryOutput) (*p
 // --- Test cases ---
 
 func TestQuery_GoBeforeHook_Accept(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.DefaultHookTimeoutSeconds = 5
 	config.BeforeQueryHooks = []pgmcp.BeforeQueryHookEntry{
@@ -127,6 +128,7 @@ func TestQuery_GoBeforeHook_Accept(t *testing.T) {
 }
 
 func TestQuery_GoBeforeHook_Reject(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.DefaultHookTimeoutSeconds = 5
 	config.BeforeQueryHooks = []pgmcp.BeforeQueryHookEntry{
@@ -147,6 +149,7 @@ func TestQuery_GoBeforeHook_Reject(t *testing.T) {
 }
 
 func TestQuery_GoBeforeHook_ModifyQuery(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.DefaultHookTimeoutSeconds = 5
 	config.BeforeQueryHooks = []pgmcp.BeforeQueryHookEntry{
@@ -172,6 +175,7 @@ func TestQuery_GoBeforeHook_ModifyQuery(t *testing.T) {
 }
 
 func TestQuery_GoBeforeHook_Timeout(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.DefaultHookTimeoutSeconds = 1
 	config.BeforeQueryHooks = []pgmcp.BeforeQueryHookEntry{
@@ -192,6 +196,7 @@ func TestQuery_GoBeforeHook_Timeout(t *testing.T) {
 }
 
 func TestQuery_GoBeforeHook_ProtectionStillApplied(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.DefaultHookTimeoutSeconds = 5
 	config.Protection.AllowDDL = true
@@ -211,6 +216,7 @@ func TestQuery_GoBeforeHook_ProtectionStillApplied(t *testing.T) {
 }
 
 func TestQuery_GoAfterHook_Accept(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.DefaultHookTimeoutSeconds = 5
 	config.AfterQueryHooks = []pgmcp.AfterQueryHookEntry{
@@ -235,6 +241,7 @@ func TestQuery_GoAfterHook_Accept(t *testing.T) {
 }
 
 func TestQuery_GoAfterHook_Reject(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.DefaultHookTimeoutSeconds = 5
 	config.AfterQueryHooks = []pgmcp.AfterQueryHookEntry{
@@ -255,6 +262,7 @@ func TestQuery_GoAfterHook_Reject(t *testing.T) {
 }
 
 func TestQuery_GoAfterHook_ModifyResult(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.DefaultHookTimeoutSeconds = 5
 	config.AfterQueryHooks = []pgmcp.AfterQueryHookEntry{
@@ -278,6 +286,7 @@ func TestQuery_GoAfterHook_ModifyResult(t *testing.T) {
 }
 
 func TestQuery_GoAfterHook_Timeout(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.DefaultHookTimeoutSeconds = 1
 	config.AfterQueryHooks = []pgmcp.AfterQueryHookEntry{
@@ -298,6 +307,7 @@ func TestQuery_GoAfterHook_Timeout(t *testing.T) {
 }
 
 func TestQuery_GoAfterHook_NoPrecisionLoss(t *testing.T) {
+	t.Parallel()
 	// Setup: create table and insert bigint 2^53+1
 	setupConfig := defaultConfig()
 	setupConfig.Protection.AllowDDL = true
@@ -350,6 +360,7 @@ func TestQuery_GoAfterHook_NoPrecisionLoss(t *testing.T) {
 }
 
 func TestQuery_GoAfterHook_RejectRollbacksWrite(t *testing.T) {
+	t.Parallel()
 	// Setup: create table with a non-hooked instance
 	setupConfig := defaultConfig()
 	setupConfig.Protection.AllowDDL = true
@@ -397,6 +408,7 @@ func TestQuery_GoAfterHook_RejectRollbacksWrite(t *testing.T) {
 }
 
 func TestQuery_GoAfterHook_AcceptCommitsWrite(t *testing.T) {
+	t.Parallel()
 	// Setup: create table with a non-hooked instance
 	setupConfig := defaultConfig()
 	setupConfig.Protection.AllowDDL = true
@@ -441,6 +453,7 @@ func TestQuery_GoAfterHook_AcceptCommitsWrite(t *testing.T) {
 }
 
 func TestQuery_GoHooksMutualExclusion(t *testing.T) {
+	t.Parallel()
 	defer func() {
 		r := recover()
 		if r == nil {
@@ -469,6 +482,7 @@ func TestQuery_GoHooksMutualExclusion(t *testing.T) {
 }
 
 func TestQuery_GoHooksDefaultTimeoutRequired(t *testing.T) {
+	t.Parallel()
 	defer func() {
 		r := recover()
 		if r == nil {

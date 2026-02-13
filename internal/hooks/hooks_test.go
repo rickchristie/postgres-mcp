@@ -24,6 +24,7 @@ func hookScript(name string) string {
 // --- BeforeQuery Tests ---
 
 func TestBeforeQuery_Accept(t *testing.T) {
+	t.Parallel()
 	r := NewRunner(Config{
 		DefaultTimeout: 5 * time.Second,
 		BeforeQuery: []HookEntry{
@@ -41,6 +42,7 @@ func TestBeforeQuery_Accept(t *testing.T) {
 }
 
 func TestBeforeQuery_Reject(t *testing.T) {
+	t.Parallel()
 	r := NewRunner(Config{
 		DefaultTimeout: 5 * time.Second,
 		BeforeQuery: []HookEntry{
@@ -58,6 +60,7 @@ func TestBeforeQuery_Reject(t *testing.T) {
 }
 
 func TestBeforeQuery_ModifyQuery(t *testing.T) {
+	t.Parallel()
 	r := NewRunner(Config{
 		DefaultTimeout: 5 * time.Second,
 		BeforeQuery: []HookEntry{
@@ -75,6 +78,7 @@ func TestBeforeQuery_ModifyQuery(t *testing.T) {
 }
 
 func TestBeforeQuery_PatternNoMatch(t *testing.T) {
+	t.Parallel()
 	r := NewRunner(Config{
 		DefaultTimeout: 5 * time.Second,
 		BeforeQuery: []HookEntry{
@@ -92,6 +96,7 @@ func TestBeforeQuery_PatternNoMatch(t *testing.T) {
 }
 
 func TestBeforeQuery_Chaining(t *testing.T) {
+	t.Parallel()
 	r := NewRunner(Config{
 		DefaultTimeout: 5 * time.Second,
 		BeforeQuery: []HookEntry{
@@ -111,6 +116,7 @@ func TestBeforeQuery_Chaining(t *testing.T) {
 }
 
 func TestBeforeQuery_ChainPatternReEval(t *testing.T) {
+	t.Parallel()
 	r := NewRunner(Config{
 		DefaultTimeout: 5 * time.Second,
 		BeforeQuery: []HookEntry{
@@ -129,6 +135,7 @@ func TestBeforeQuery_ChainPatternReEval(t *testing.T) {
 }
 
 func TestBeforeQuery_Timeout(t *testing.T) {
+	t.Parallel()
 	r := NewRunner(Config{
 		DefaultTimeout: 1 * time.Second,
 		BeforeQuery: []HookEntry{
@@ -146,6 +153,7 @@ func TestBeforeQuery_Timeout(t *testing.T) {
 }
 
 func TestBeforeQuery_Crash(t *testing.T) {
+	t.Parallel()
 	r := NewRunner(Config{
 		DefaultTimeout: 5 * time.Second,
 		BeforeQuery: []HookEntry{
@@ -163,6 +171,7 @@ func TestBeforeQuery_Crash(t *testing.T) {
 }
 
 func TestBeforeQuery_UnparseableResponse(t *testing.T) {
+	t.Parallel()
 	r := NewRunner(Config{
 		DefaultTimeout: 5 * time.Second,
 		BeforeQuery: []HookEntry{
@@ -182,6 +191,7 @@ func TestBeforeQuery_UnparseableResponse(t *testing.T) {
 // --- AfterQuery Tests ---
 
 func TestAfterQuery_Accept(t *testing.T) {
+	t.Parallel()
 	r := NewRunner(Config{
 		DefaultTimeout: 5 * time.Second,
 		AfterQuery: []HookEntry{
@@ -199,6 +209,7 @@ func TestAfterQuery_Accept(t *testing.T) {
 }
 
 func TestAfterQuery_Reject(t *testing.T) {
+	t.Parallel()
 	r := NewRunner(Config{
 		DefaultTimeout: 5 * time.Second,
 		AfterQuery: []HookEntry{
@@ -216,6 +227,7 @@ func TestAfterQuery_Reject(t *testing.T) {
 }
 
 func TestAfterQuery_ModifyResult(t *testing.T) {
+	t.Parallel()
 	r := NewRunner(Config{
 		DefaultTimeout: 5 * time.Second,
 		AfterQuery: []HookEntry{
@@ -233,6 +245,7 @@ func TestAfterQuery_ModifyResult(t *testing.T) {
 }
 
 func TestAfterQuery_Chaining(t *testing.T) {
+	t.Parallel()
 	r := NewRunner(Config{
 		DefaultTimeout: 5 * time.Second,
 		AfterQuery: []HookEntry{
@@ -251,6 +264,7 @@ func TestAfterQuery_Chaining(t *testing.T) {
 }
 
 func TestAfterQuery_Timeout(t *testing.T) {
+	t.Parallel()
 	r := NewRunner(Config{
 		DefaultTimeout: 1 * time.Second,
 		AfterQuery: []HookEntry{
@@ -268,6 +282,7 @@ func TestAfterQuery_Timeout(t *testing.T) {
 }
 
 func TestAfterQuery_Crash(t *testing.T) {
+	t.Parallel()
 	r := NewRunner(Config{
 		DefaultTimeout: 5 * time.Second,
 		AfterQuery: []HookEntry{
@@ -285,6 +300,7 @@ func TestAfterQuery_Crash(t *testing.T) {
 }
 
 func TestAfterQuery_UnparseableResponse(t *testing.T) {
+	t.Parallel()
 	r := NewRunner(Config{
 		DefaultTimeout: 5 * time.Second,
 		AfterQuery: []HookEntry{
@@ -322,6 +338,7 @@ func TestHookStdinInput(t *testing.T) {
 }
 
 func TestHookWithArgs(t *testing.T) {
+	t.Parallel()
 	r := NewRunner(Config{
 		DefaultTimeout: 5 * time.Second,
 		BeforeQuery: []HookEntry{
@@ -339,6 +356,7 @@ func TestHookWithArgs(t *testing.T) {
 }
 
 func TestHookWithEmptyArgs(t *testing.T) {
+	t.Parallel()
 	r := NewRunner(Config{
 		DefaultTimeout: 5 * time.Second,
 		BeforeQuery: []HookEntry{
@@ -356,6 +374,7 @@ func TestHookWithEmptyArgs(t *testing.T) {
 }
 
 func TestHookDefaultTimeout(t *testing.T) {
+	t.Parallel()
 	r := NewRunner(Config{
 		DefaultTimeout: 1 * time.Second,
 		BeforeQuery: []HookEntry{
@@ -373,6 +392,7 @@ func TestHookDefaultTimeout(t *testing.T) {
 }
 
 func TestHookPerHookTimeoutOverridesDefault(t *testing.T) {
+	t.Parallel()
 	r := NewRunner(Config{
 		DefaultTimeout: 1 * time.Second,
 		BeforeQuery: []HookEntry{
@@ -394,6 +414,7 @@ func TestHookPerHookTimeoutOverridesDefault(t *testing.T) {
 }
 
 func TestHookPanicOnZeroDefaultTimeout(t *testing.T) {
+	t.Parallel()
 	defer func() {
 		r := recover()
 		if r == nil {
@@ -414,6 +435,7 @@ func TestHookPanicOnZeroDefaultTimeout(t *testing.T) {
 }
 
 func TestHasAfterQueryHooks_True(t *testing.T) {
+	t.Parallel()
 	r := NewRunner(Config{
 		DefaultTimeout: 5 * time.Second,
 		AfterQuery: []HookEntry{
@@ -427,6 +449,7 @@ func TestHasAfterQueryHooks_True(t *testing.T) {
 }
 
 func TestHasAfterQueryHooks_False(t *testing.T) {
+	t.Parallel()
 	r := NewRunner(Config{
 		DefaultTimeout: 5 * time.Second,
 		BeforeQuery: []HookEntry{
@@ -437,4 +460,30 @@ func TestHasAfterQueryHooks_False(t *testing.T) {
 	if r.HasAfterQueryHooks() {
 		t.Fatal("expected HasAfterQueryHooks to return false")
 	}
+}
+
+func TestNewRunnerPanicsOnInvalidRegex(t *testing.T) {
+	t.Parallel()
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected panic for invalid regex pattern")
+		}
+		msg, ok := r.(string)
+		if !ok {
+			t.Fatalf("expected string panic, got %T: %v", r, r)
+		}
+		if !strings.Contains(msg, "invalid regex pattern") {
+			t.Fatalf("expected panic message to contain 'invalid regex pattern', got: %s", msg)
+		}
+		if !strings.Contains(msg, "[invalid") {
+			t.Fatalf("expected panic message to contain the invalid pattern, got: %s", msg)
+		}
+	}()
+	NewRunner(Config{
+		DefaultTimeout: 5 * time.Second,
+		BeforeQuery: []HookEntry{
+			{Pattern: `[invalid`, Command: "dummy"},
+		},
+	}, testLogger())
 }

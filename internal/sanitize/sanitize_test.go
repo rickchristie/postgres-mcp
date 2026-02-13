@@ -2,6 +2,7 @@ package sanitize
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -16,6 +17,7 @@ var ktpRule = Rule{
 }
 
 func TestSanitizePhoneNumber(t *testing.T) {
+	t.Parallel()
 	s := NewSanitizer([]Rule{phoneRule})
 	result := s.sanitizeValue("+62821233447")
 	if result != "+62xxx447" {
@@ -24,6 +26,7 @@ func TestSanitizePhoneNumber(t *testing.T) {
 }
 
 func TestSanitizeKTP(t *testing.T) {
+	t.Parallel()
 	s := NewSanitizer([]Rule{ktpRule})
 	result := s.sanitizeValue("3201234567890001")
 	if result != "3201xxxxxxxx0001" {
@@ -32,6 +35,7 @@ func TestSanitizeKTP(t *testing.T) {
 }
 
 func TestNoMatch(t *testing.T) {
+	t.Parallel()
 	s := NewSanitizer([]Rule{phoneRule})
 	result := s.sanitizeValue("hello world")
 	if result != "hello world" {
@@ -40,6 +44,7 @@ func TestNoMatch(t *testing.T) {
 }
 
 func TestMultipleRulesOrdering(t *testing.T) {
+	t.Parallel()
 	// First rule masks phone number, second rule replaces "xxx" with "***".
 	rules := []Rule{
 		phoneRule,
@@ -55,6 +60,7 @@ func TestMultipleRulesOrdering(t *testing.T) {
 }
 
 func TestSanitizeJSONBField(t *testing.T) {
+	t.Parallel()
 	s := NewSanitizer([]Rule{phoneRule})
 	input := map[string]interface{}{
 		"phone": "+62821233447",
@@ -70,6 +76,7 @@ func TestSanitizeJSONBField(t *testing.T) {
 }
 
 func TestSanitizeNestedJSONB(t *testing.T) {
+	t.Parallel()
 	s := NewSanitizer([]Rule{phoneRule})
 	input := map[string]interface{}{
 		"contact": map[string]interface{}{
@@ -85,6 +92,7 @@ func TestSanitizeNestedJSONB(t *testing.T) {
 }
 
 func TestSanitizeArrayField(t *testing.T) {
+	t.Parallel()
 	s := NewSanitizer([]Rule{phoneRule})
 	input := []interface{}{"+62821233447", "+62899887766"}
 	result := s.sanitizeValue(input)
@@ -98,6 +106,7 @@ func TestSanitizeArrayField(t *testing.T) {
 }
 
 func TestSanitizeNullField(t *testing.T) {
+	t.Parallel()
 	s := NewSanitizer([]Rule{phoneRule})
 	result := s.sanitizeValue(nil)
 	if result != nil {
@@ -106,6 +115,7 @@ func TestSanitizeNullField(t *testing.T) {
 }
 
 func TestSanitizeNumericField(t *testing.T) {
+	t.Parallel()
 	s := NewSanitizer([]Rule{phoneRule})
 	result := s.sanitizeValue(int64(12345))
 	if result != int64(12345) {
@@ -114,6 +124,7 @@ func TestSanitizeNumericField(t *testing.T) {
 }
 
 func TestSanitizeJsonNumber(t *testing.T) {
+	t.Parallel()
 	s := NewSanitizer([]Rule{phoneRule})
 	input := json.Number("9007199254740993")
 	result := s.sanitizeValue(input)
@@ -127,6 +138,7 @@ func TestSanitizeJsonNumber(t *testing.T) {
 }
 
 func TestSanitizeBooleanField(t *testing.T) {
+	t.Parallel()
 	s := NewSanitizer([]Rule{phoneRule})
 	result := s.sanitizeValue(true)
 	if result != true {
@@ -135,6 +147,7 @@ func TestSanitizeBooleanField(t *testing.T) {
 }
 
 func TestSanitizeEmptyRules(t *testing.T) {
+	t.Parallel()
 	s := NewSanitizer([]Rule{})
 	result := s.sanitizeValue("+62821233447")
 	if result != "+62821233447" {
@@ -143,6 +156,7 @@ func TestSanitizeEmptyRules(t *testing.T) {
 }
 
 func TestSanitizeRows(t *testing.T) {
+	t.Parallel()
 	s := NewSanitizer([]Rule{phoneRule})
 	rows := []map[string]interface{}{
 		{
@@ -203,4 +217,27 @@ func TestSanitizeRows(t *testing.T) {
 	if jn.String() != "42" {
 		t.Fatalf("expected 42, got %v", jn)
 	}
+}
+
+func TestNewSanitizerPanicsOnInvalidRegex(t *testing.T) {
+	t.Parallel()
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected panic for invalid regex pattern")
+		}
+		msg, ok := r.(string)
+		if !ok {
+			t.Fatalf("expected string panic, got %T: %v", r, r)
+		}
+		if !strings.Contains(msg, "invalid regex pattern") {
+			t.Fatalf("expected panic message to contain 'invalid regex pattern', got: %s", msg)
+		}
+		if !strings.Contains(msg, "[invalid") {
+			t.Fatalf("expected panic message to contain the invalid pattern, got: %s", msg)
+		}
+	}()
+	NewSanitizer([]Rule{
+		{Pattern: `[invalid`, Replacement: "x"},
+	})
 }

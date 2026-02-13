@@ -5,6 +5,7 @@ import (
 )
 
 func TestMatchPermissionDenied(t *testing.T) {
+	t.Parallel()
 	m := NewMatcher([]Rule{
 		{Pattern: `(?i)permission denied`, Message: "You do not have sufficient privileges. Ask the user to check table permissions."},
 	})
@@ -18,6 +19,7 @@ func TestMatchPermissionDenied(t *testing.T) {
 }
 
 func TestMatchRelationNotExist(t *testing.T) {
+	t.Parallel()
 	m := NewMatcher([]Rule{
 		{Pattern: `(?i)relation.*does not exist`, Message: "The table does not exist. Use ListTables to see available tables."},
 	})
@@ -31,6 +33,7 @@ func TestMatchRelationNotExist(t *testing.T) {
 }
 
 func TestNoMatch(t *testing.T) {
+	t.Parallel()
 	m := NewMatcher([]Rule{
 		{Pattern: `(?i)permission denied`, Message: "You do not have sufficient privileges."},
 		{Pattern: `(?i)relation.*does not exist`, Message: "The table does not exist."},
@@ -42,6 +45,7 @@ func TestNoMatch(t *testing.T) {
 }
 
 func TestMultipleMatches(t *testing.T) {
+	t.Parallel()
 	m := NewMatcher([]Rule{
 		{Pattern: `(?i)permission denied`, Message: "Check your privileges."},
 		{Pattern: `(?i)denied.*table`, Message: "Verify table access grants."},
@@ -54,6 +58,7 @@ func TestMultipleMatches(t *testing.T) {
 }
 
 func TestEmptyRules(t *testing.T) {
+	t.Parallel()
 	m := NewMatcher([]Rule{})
 	got := m.Match("any error at all")
 	if got != "" {
@@ -62,6 +67,7 @@ func TestEmptyRules(t *testing.T) {
 }
 
 func TestMatchHookError(t *testing.T) {
+	t.Parallel()
 	m := NewMatcher([]Rule{
 		{Pattern: `(?i)rejected`, Message: "The query was rejected by a hook. Review the hook configuration."},
 	})
@@ -75,6 +81,7 @@ func TestMatchHookError(t *testing.T) {
 }
 
 func TestNewMatcherPanicsOnInvalidRegex(t *testing.T) {
+	t.Parallel()
 	defer func() {
 		r := recover()
 		if r == nil {

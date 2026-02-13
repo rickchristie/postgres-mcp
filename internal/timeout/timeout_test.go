@@ -1,11 +1,13 @@
 package timeout
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
 
 func TestMatchFirstRule(t *testing.T) {
+	t.Parallel()
 	m := NewManager(Config{
 		DefaultTimeout: 30 * time.Second,
 		Rules: []Rule{
@@ -21,6 +23,7 @@ func TestMatchFirstRule(t *testing.T) {
 }
 
 func TestStopOnFirstMatch(t *testing.T) {
+	t.Parallel()
 	m := NewManager(Config{
 		DefaultTimeout: 30 * time.Second,
 		Rules: []Rule{
@@ -36,6 +39,7 @@ func TestStopOnFirstMatch(t *testing.T) {
 }
 
 func TestDefaultTimeout(t *testing.T) {
+	t.Parallel()
 	m := NewManager(Config{
 		DefaultTimeout: 30 * time.Second,
 		Rules: []Rule{
@@ -51,6 +55,7 @@ func TestDefaultTimeout(t *testing.T) {
 }
 
 func TestNoRules(t *testing.T) {
+	t.Parallel()
 	m := NewManager(Config{
 		DefaultTimeout: 30 * time.Second,
 		Rules:          []Rule{},
@@ -60,4 +65,30 @@ func TestNoRules(t *testing.T) {
 	if got != 30*time.Second {
 		t.Errorf("expected 30s (default), got %v", got)
 	}
+}
+
+func TestNewManagerPanicsOnInvalidRegex(t *testing.T) {
+	t.Parallel()
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected panic for invalid regex pattern")
+		}
+		msg, ok := r.(string)
+		if !ok {
+			t.Fatalf("expected string panic, got %T: %v", r, r)
+		}
+		if !strings.Contains(msg, "invalid regex pattern") {
+			t.Fatalf("expected panic message to contain 'invalid regex pattern', got: %s", msg)
+		}
+		if !strings.Contains(msg, "[invalid") {
+			t.Fatalf("expected panic message to contain the invalid pattern, got: %s", msg)
+		}
+	}()
+	NewManager(Config{
+		DefaultTimeout: 30 * time.Second,
+		Rules: []Rule{
+			{Pattern: `[invalid`, Timeout: 5 * time.Second},
+		},
+	})
 }

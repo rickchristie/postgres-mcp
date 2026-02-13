@@ -293,8 +293,8 @@ The `Config` struct includes Go hook fields (`BeforeQueryHooks`/`AfterQueryHooks
 - All per-hook and per-rule timeout values must be > 0
 
 **ServerConfig validation (additional, runs in CLI mode only)** — panics on failure:
-- `server.port` must be specified and > 0
-- `server.health_check_path` must be non-empty if `server.health_check_enabled` is true — no default, user must explicitly set this
+- `server.port` must be specified and > 0 — validated in `runServe()` with panic
+- `server.health_check_path` must be non-empty if `server.health_check_enabled` is true — validated in `runServe()` with returned error (not panic)
 - If both Go hooks (`Config.BeforeQueryHooks`/`Config.AfterQueryHooks`) and command hooks (`ServerConfig.ServerHooks.BeforeQuery`/`ServerConfig.ServerHooks.AfterQuery`) are configured, panic — they are mutually exclusive
 - `config.DefaultHookTimeoutSeconds` must be > 0 if any command hooks are configured in `ServerConfig.ServerHooks`
 
@@ -365,6 +365,10 @@ func (c *Checker) Check(sql string) error {
     result, err := pg_query.Parse(sql)
     if err != nil {
         return fmt.Errorf("SQL parse error: %w", err)
+    }
+
+    if len(result.Stmts) == 0 {
+        return fmt.Errorf("SQL parse error: empty query")
     }
 
     // Multi-statement detection — always enforced, cannot be toggled off.
@@ -534,6 +538,12 @@ func (c *Checker) checkNode(node *pg_query.Node) error {
             return fmt.Errorf("ALTER ROLE/USER is not allowed: can modify role privileges including SUPERUSER")
         }
 
+    case *pg_query.Node_AlterRoleSetStmt:
+        // ALTER USER testuser SET search_path = 'public' generates AlterRoleSetStmt, not AlterRoleStmt.
+        if !c.config.AllowManageRoles {
+            return fmt.Errorf("ALTER ROLE/USER is not allowed: can modify role privileges including SUPERUSER")
+        }
+
     case *pg_query.Node_DropRoleStmt:
         if !c.config.AllowManageRoles {
             return fmt.Errorf("DROP ROLE/USER is not allowed: can delete database roles")
@@ -675,9 +685,12 @@ func (c *Checker) checkNode(node *pg_query.Node) error {
             for _, opt := range txStmt.Options {
                 if defElem, ok := opt.Node.(*pg_query.Node_DefElem); ok {
                     if defElem.DefElem.Defname == "transaction_read_only" {
-                        if intVal, ok := defElem.DefElem.Arg.Node.(*pg_query.Node_Integer); ok {
-                            if intVal.Integer.Ival == 0 { // 0 = false = READ WRITE
-                                return fmt.Errorf("BEGIN READ WRITE is blocked in read-only mode: cannot start a read-write transaction")
+                        // In pg_query_go v6, the arg is AConst with Ival (not Node_Integer).
+                        if aconst, ok := defElem.DefElem.Arg.Node.(*pg_query.Node_AConst); ok {
+                            if ival, ok := aconst.AConst.Val.(*pg_query.A_Const_Ival); ok {
+                                if ival.Ival.Ival == 0 { // 0 = false = READ WRITE
+                                    return fmt.Errorf("BEGIN READ WRITE is blocked in read-only mode: cannot start a read-write transaction")
+                                }
                             }
                         }
                     }
@@ -2230,7 +2243,11 @@ mcpServer.AddTool(queryTool, func(ctx context.Context, req mcp.CallToolRequest) 
     if output.Error != "" {
         return mcp.NewToolResultError(output.Error), nil
     }
-    return mcp.NewToolResultJSON(output)
+    jsonBytes, err := json.Marshal(output)
+    if err != nil {
+        return mcp.NewToolResultError("failed to marshal query result"), nil
+    }
+    return mcp.NewToolResultText(string(jsonBytes)), nil
 })
 ```
 
@@ -2278,15 +2295,10 @@ func runServe() error {
     defer pgMcp.Close(ctx)
 
     // 5. Create MCP server with session lifecycle logging.
-    // Log when AI agents connect (initialize) and disconnect.
-    mcpServer := server.NewMCPServer("gopgmcp", "1.0.0",
-        server.WithToolCapabilities(true),
-    )
-
-    // Register session lifecycle hooks for logging.
-    // mcp-go calls these on initialize (client connects) and session close (client disconnects).
-    // In stateless mode, each initialize call is independent — log each one.
-    mcpServer.OnInitialize(func(ctx context.Context, req *mcp.InitializeRequest) {
+    // Log when AI agents connect (initialize).
+    // Use server.Hooks with AddAfterInitialize (mcp-go does not have OnInitialize method).
+    hooks := &server.Hooks{}
+    hooks.AddAfterInitialize(func(ctx context.Context, id any, req *mcp.InitializeRequest, result *mcp.InitializeResult) {
         clientName := req.Params.ClientInfo.Name
         clientVersion := req.Params.ClientInfo.Version
         logger.Info().
@@ -2295,19 +2307,12 @@ func runServe() error {
             Msg("AI agent connected (MCP initialize)")
     })
 
-    pgmcp.RegisterMCPTools(mcpServer, pgMcp)
-
-    // 6. Start HTTP server
-    httpServer := server.NewStreamableHTTPServer(mcpServer,
-        server.WithStateLess(),
+    mcpServer := server.NewMCPServer("gopgmcp", "1.0.0",
+        server.WithToolCapabilities(true),
+        server.WithHooks(hooks),
     )
 
-    // 7. Optionally register health check (separate http handler)
-    // The mcp-go StreamableHTTP handles /mcp endpoint.
-    // Health check is a separate endpoint on the same port.
-    // We may need a custom http.ServeMux to serve both.
-
-    // 8. Start listening
+    pgmcp.RegisterMCPTools(mcpServer, pgMcp)
     logger.Info().Int("port", serverConfig.Server.Port).Msg("starting gopgmcp server")
     return httpServer.Start(fmt.Sprintf(":%d", serverConfig.Server.Port))
 }
@@ -2357,7 +2362,7 @@ httpSrv := &http.Server{
 // Step 4: Create the StreamableHTTPServer with the custom http.Server.
 streamableServer := server.NewStreamableHTTPServer(mcpServer,
     server.WithEndpointPath("/mcp"),
-    server.WithStateLess(),
+    server.WithStateLess(true),
     server.WithStreamableHTTPServer(httpSrv),
 )
 
@@ -2855,7 +2860,7 @@ All tests are pure unit tests — no database needed. Default config: all `Allow
 | `TestSQLInjection_UnionBased` | `SELECT * FROM users WHERE id = 1 UNION SELECT * FROM pg_shadow` | default | allowed (single statement, no protection rule against UNION) |
 | `TestSQLInjection_CommentBased` | `SELECT * FROM users -- WHERE admin = true` | default | allowed (single statement, comment is valid SQL) |
 | `TestSQLInjection_MultiStatement` | `SELECT * FROM users; DROP TABLE users` | default | `"multi-statement queries are not allowed: found 2 statements"` |
-| `TestSQLInjection_Stacked` | `SELECT 1; DELETE FROM users; --` | default | `"multi-statement queries are not allowed: found 2 statements"` |
+| `TestSQLInjection_Stacked` | `SELECT 1; DELETE FROM users; --` | default | `"multi-statement queries are not allowed: found 2 statements"` (pg_query sees 2 statements: trailing `; --` is a comment, not a third statement) |
 | `TestEmptySQL` | `` (empty string) | default | `"SQL parse error"` |
 | `TestWhitespaceOnlySQL` | `   ` | default | `"SQL parse error"` |
 
@@ -2937,9 +2942,10 @@ These test the `runGoBeforeHooks` and `runGoAfterHooks` methods directly, using 
 | `TestMatchPermissionDenied` | `permission denied for table users` | `(?i)permission denied` → message | message returned |
 | `TestMatchRelationNotExist` | `relation "foo" does not exist` | `(?i)relation.*does not exist` → message | message returned |
 | `TestNoMatch` | `some other error` | both rules | empty string |
-| `TestMultipleMatches` | `permission denied, relation does not exist` | both rules | both messages concatenated |
+| `TestMultipleMatches` | `permission denied for table users` | `(?i)permission denied` + `(?i)denied.*table` | both messages concatenated with `\n` separator |
 | `TestEmptyRules` | any error | no rules | empty string |
 | `TestMatchHookError` | `rejected by test hook` | `(?i)rejected` → message | message returned |
+| `TestNewMatcherPanicsOnInvalidRegex` | N/A | `[invalid` (bad regex) | panics with invalid regex error |
 
 ### 6.5 Unit Tests: Timeout (`internal/timeout/timeout_test.go`)
 
@@ -2950,7 +2956,9 @@ These test the `runGoBeforeHooks` and `runGoAfterHooks` methods directly, using 
 | `TestDefaultTimeout` | `SELECT 1` | no matching rules, default=30s | 30s |
 | `TestNoRules` | `SELECT 1` | empty rules, default=30s | 30s |
 
-### 6.6 Unit Tests: Config (`config_test.go` or `internal/configure/configure_test.go`)
+### 6.6 Unit Tests: Config
+
+Config loading/validation tests are in `cmd/gopgmcp/serve_test.go` (CLI-level tests with `loadServerConfig()`). Config struct tests (protection defaults, JSON tags, Go hooks validation) are in `config_test.go` (root package). Configure wizard tests are in `internal/configure/configure_test.go`.
 
 | Test | Scenario | Expected |
 |---|---|---|
@@ -2960,7 +2968,7 @@ These test the `runGoBeforeHooks` and `runGoAfterHooks` methods directly, using 
 | `TestLoadConfigInvalidJSON` | malformed JSON | returns error containing `"invalid"` or `"unmarshal"` |
 | `TestLoadConfigInvalidRegex` | invalid regex in sanitization rules | panics with message containing `"regex"` or `"compile"` and the invalid pattern |
 | `TestLoadConfigDefaults_MaxResultLength` | config with `max_result_length` omitted (0) | defaults to `100000` |
-| `TestLoadConfigValidation_NoPort` | config without server.port | panics with message containing `"server.port"` |
+| `TestLoadConfigValidation_NoPort` | config with server.port = 0 | verifies loaded config has port 0 (actual panic validation happens in `runServe()`, not tested here) |
 | `TestLoadConfigValidation_ZeroMaxConns` | config with pool.max_conns = 0 | panics with message containing `"pool.max_conns"` |
 | `TestLoadConfigValidation_ZeroDefaultTimeout` | config with `default_timeout_seconds` = 0 | panics with message containing `"default_timeout_seconds"` |
 | `TestLoadConfigValidation_MissingDefaultTimeout` | config without `default_timeout_seconds` | panics with message containing `"default_timeout_seconds"` (no default, must be set) |
@@ -2971,7 +2979,7 @@ These test the `runGoBeforeHooks` and `runGoAfterHooks` methods directly, using 
 | `TestLoadConfigValidation_MissingHookDefaultTimeout` | hooks configured but `default_hook_timeout_seconds` omitted | panics with message containing `"default_hook_timeout_seconds"` (no default, must be set) |
 | `TestLoadConfigValidation_HookDefaultTimeoutNotRequiredWithoutHooks` | no hooks configured, `default_hook_timeout_seconds` omitted | no panic (validation only applies when hooks exist) |
 | `TestLoadConfigValidation_HookTimeoutFallback` | hook with `timeout_seconds` = 0, `default_hook_timeout_seconds` = 10 | hook uses default (10s) |
-| `TestLoadConfigValidation_HealthCheckPathEmpty` | `health_check_enabled` = true, `health_check_path` = "" | panics with message containing `"health_check_path"` |
+| `TestLoadConfigValidation_HealthCheckPathEmpty` | `health_check_enabled` = true, `health_check_path` = "" | verifies loaded config has empty path with health check enabled (actual validation happens in `runServe()`, not tested here) |
 | `TestLoadConfigValidation_HealthCheckPathNotRequiredWhenDisabled` | `health_check_enabled` = false, `health_check_path` = "" | no panic (path not needed when disabled) |
 | `TestLoadConfigDefaults_MaxSQLLength` | config with `max_sql_length` omitted (0) | defaults to `100000` |
 | `TestLoadConfigProtectionDefaults` | minimal config, no protection fields | all `Allow*` fields are `false` (Go zero-value = blocked), including `AllowCopyFrom`, `AllowCopyTo`, `AllowCreateFunction`, `AllowPrepare`, `AllowMerge`, `AllowGrantRevoke`, `AllowManageRoles`, `AllowCreateExtension`, `AllowLockTable`, `AllowListenNotify`, `AllowMaintenance`, `AllowDDL`, `AllowDiscard`, `AllowComment`, `AllowCreateTrigger`, `AllowCreateRule` |
@@ -3335,7 +3343,7 @@ Build tag: `//go:build integration`
 | Test | Description |
 |---|---|
 | `TestStress_ConcurrentQueries` | Spawn 50 goroutines each running 20 queries. Assert all complete without error. Verify total time is reasonable (bounded by pool size, not sequential). |
-| `TestStress_SemaphoreLimit` | Config max_conns=3. Spawn 20 goroutines with `SELECT pg_sleep(0.1)`. Assert max 3 concurrent queries (instrument with atomic counter). |
+| `TestStress_SemaphoreLimit` | Config max_conns=3. Spawn 20 goroutines with `SELECT pg_sleep(0.1)`. Smoke test: validates no deadlocks or errors under contention. Note: the atomic counter tracks goroutines inside `Query()` (including pre/post-DB work), not actual concurrent DB connections, so it does not assert `maxConcurrent <= MaxConns`. |
 | `TestStress_LargeResultTruncation` | Insert 10,000 rows. `SELECT *` with max_result_length=1000. Assert error contains `"[truncated] Result is too long! Add limits in your query!"`. |
 | `TestStress_ConcurrentHooks` | Config with hooks. Spawn 20 goroutines querying. Assert hooks run correctly under concurrency (no data races, no cross-contamination). |
 | `TestStress_MixedOperations` | Concurrent mix of Query, ListTables, DescribeTable. Assert all complete correctly. |
