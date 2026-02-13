@@ -1262,7 +1262,7 @@ func (p *PostgresMcp) Query(ctx context.Context, input QueryInput) *QueryOutput 
     // Since we enforce single-statement and have the parsed AST from protection check,
     // we can determine whether this is a read-only query (SELECT, EXPLAIN) or a write
     // (INSERT/UPDATE/DELETE/MERGE/etc.).
-    isReadOnly := p.isReadOnlyStatement(sql)
+    isReadOnly := isReadOnlyStatement(sql)
 
     // 9. For read-only queries, rollback immediately (no commit needed).
     // This frees the transaction before running AfterQuery hooks.
@@ -1352,7 +1352,7 @@ func (p *PostgresMcp) Query(ctx context.Context, input QueryInput) *QueryOutput 
 // The SQL has already passed protection checks (single statement, parsed successfully).
 // For read-only statements, we rollback the transaction immediately after collecting results
 // (no commit needed). For write statements, we defer commit until after AfterQuery hooks.
-func (p *PostgresMcp) isReadOnlyStatement(sql string) bool {
+func isReadOnlyStatement(sql string) bool {
     result, err := pg_query.Parse(sql)
     if err != nil || len(result.Stmts) == 0 {
         // If we can't parse (shouldn't happen — protection check already parsed),
@@ -1666,8 +1666,8 @@ func convertValue(v interface{}) interface{} {
         if !val.Valid {
             return nil
         }
-        points := make([]string, len(val.Points))
-        for i, p := range val.Points {
+        points := make([]string, len(val.P))
+        for i, p := range val.P {
             points[i] = fmt.Sprintf("(%g,%g)", p.X, p.Y)
         }
         joined := strings.Join(points, ",")
@@ -1679,8 +1679,8 @@ func convertValue(v interface{}) interface{} {
         if !val.Valid {
             return nil
         }
-        points := make([]string, len(val.Points))
-        for i, p := range val.Points {
+        points := make([]string, len(val.P))
+        for i, p := range val.P {
             points[i] = fmt.Sprintf("(%g,%g)", p.X, p.Y)
         }
         return "(" + strings.Join(points, ",") + ")"
@@ -1688,7 +1688,7 @@ func convertValue(v interface{}) interface{} {
         if !val.Valid {
             return nil
         }
-        return fmt.Sprintf("<(%g,%g),%g>", val.Center.X, val.Center.Y, val.Radius)
+        return fmt.Sprintf("<(%g,%g),%g>", val.P.X, val.P.Y, val.R)
     case pgtype.Bits:
         // bit(n) / varbit columns. Format as bit string "10101010".
         if !val.Valid {

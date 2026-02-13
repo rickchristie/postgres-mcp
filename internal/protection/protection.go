@@ -320,11 +320,19 @@ func (c *Checker) checkNode(node *pg_query.Node) error {
 		}
 
 	case *pg_query.Node_AlterRoleSetStmt:
+		// ALTER USER testuser SET search_path = 'public' generates AlterRoleSetStmt, not AlterRoleStmt.
 		if !c.config.AllowManageRoles {
 			return fmt.Errorf("ALTER ROLE/USER is not allowed: can modify role privileges including SUPERUSER")
 		}
 
 	case *pg_query.Node_TransactionStmt:
+		// Transaction control statements are always blocked — each query runs in its own
+		// managed transaction with AfterQuery hooks running before commit. Allowing raw
+		// transaction control would interfere with the pipeline's transaction management
+		// and could bypass AfterQuery hook guardrails.
+		//
+		// Exception: in read-only mode, we give more specific error messages for
+		// BEGIN READ WRITE attempts before the general block.
 		if c.config.ReadOnly {
 			txStmt := n.TransactionStmt
 			for _, opt := range txStmt.Options {

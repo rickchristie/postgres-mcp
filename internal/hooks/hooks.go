@@ -164,22 +164,29 @@ func (r *Runner) executeHook(ctx context.Context, hook compiledHook, input strin
 	ctx, cancel := context.WithTimeout(ctx, hook.timeout)
 	defer cancel()
 
+	// Command and args are passed separately — no shell interpretation.
+	// exec.Command(name, args...) executes the binary directly.
 	cmd := exec.CommandContext(ctx, hook.command, hook.args...)
 	cmd.Stdin = strings.NewReader(input)
 
+	// Capture stderr separately for logging. Stdout is the JSON response.
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
 	output, err := cmd.Output()
 	if err != nil {
+		// Log stderr for debugging — stderr may contain diagnostic info from the hook.
 		if stderr.Len() > 0 {
 			r.logger.Warn().Str("command", hook.command).Str("stderr", stderr.String()).Msg("hook stderr output")
 		}
+		// Hooks are critical guardrails — any failure stops the pipeline.
+		// This covers: non-zero exit code, crash, timeout (context deadline exceeded).
 		if ctx.Err() == context.DeadlineExceeded {
 			return nil, fmt.Errorf("hook timed out: %s", hook.command)
 		}
 		return nil, fmt.Errorf("hook failed (command: %s): %w", hook.command, err)
 	}
+	// Log stderr even on success — hooks may emit warnings or debug info.
 	if stderr.Len() > 0 {
 		r.logger.Debug().Str("command", hook.command).Str("stderr", stderr.String()).Msg("hook stderr output")
 	}

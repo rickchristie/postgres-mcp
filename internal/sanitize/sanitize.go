@@ -35,6 +35,8 @@ func NewSanitizer(rules []Rule) *Sanitizer {
 }
 
 // SanitizeRows applies sanitization to each field value in the result rows.
+// For JSONB/array fields (map[string]interface{}, []interface{}),
+// recurses into primitive values.
 func (s *Sanitizer) SanitizeRows(rows []map[string]interface{}) []map[string]interface{} {
 	for _, row := range rows {
 		for k, v := range row {
@@ -63,6 +65,9 @@ func (s *Sanitizer) sanitizeValue(v interface{}) interface{} {
 		}
 		return val
 	default:
+		// Numeric, bool, nil, json.Number — return as-is.
+		// json.Number (from UseNumber()) is type `string` underneath but does NOT
+		// match `case string:` in Go type switches, so it correctly passes through.
 		return v
 	}
 }
