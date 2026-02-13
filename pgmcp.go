@@ -84,6 +84,12 @@ func New(ctx context.Context, connString string, config Config, logger zerolog.L
 	if config.Query.MaxResultLength == 0 {
 		config.Query.MaxResultLength = 100000
 	}
+	if config.Query.MaxSQLLength < 0 {
+		panic("pgmcp: query.max_sql_length must be > 0")
+	}
+	if config.Query.MaxResultLength < 0 {
+		panic("pgmcp: query.max_result_length must be > 0")
+	}
 
 	// Validate hook configuration: Go hooks and command hooks are mutually exclusive
 	hasGoHooks := len(config.BeforeQueryHooks) > 0 || len(config.AfterQueryHooks) > 0
@@ -255,7 +261,8 @@ func New(ctx context.Context, connString string, config Config, logger zerolog.L
 	}, nil
 }
 
-// Close closes the connection pool. Accepts context for controlled shutdown.
+// Close closes the connection pool. Accepts context for API forward-compatibility,
+// but does not currently use it — pgxpool.Pool.Close() does not support context-based shutdown.
 func (p *PostgresMcp) Close(ctx context.Context) {
 	p.pool.Close()
 }

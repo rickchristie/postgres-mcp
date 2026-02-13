@@ -461,23 +461,18 @@ func (p *PostgresMcp) handleError(err error) *QueryOutput {
 	return &QueryOutput{Error: errMsg}
 }
 
-// truncateIfNeeded truncates query output rows if they exceed MaxResultLength.
+// truncateIfNeeded truncates query output rows if they exceed MaxResultLength (in characters).
 func (p *PostgresMcp) truncateIfNeeded(output *QueryOutput) {
-	if p.config.Query.MaxResultLength <= 0 {
+	jsonBytes, _ := json.Marshal(output.Rows)
+	jsonStr := string(jsonBytes)
+	if utf8.RuneCountInString(jsonStr) <= p.config.Query.MaxResultLength {
 		return
 	}
-	// FIXME: Performance optimization — json.Marshal here just to measure length.
-	// The MCP server will marshal the same data again when sending the response.
-	jsonBytes, _ := json.Marshal(output.Rows)
-	if len(jsonBytes) > p.config.Query.MaxResultLength {
-		truncateAt := p.config.Query.MaxResultLength
-		for truncateAt > 0 && !utf8.RuneStart(jsonBytes[truncateAt]) {
-			truncateAt--
-		}
-		truncated := string(jsonBytes[:truncateAt])
-		output.Rows = nil
-		output.Error = truncated + "...[truncated] Result is too long! Add limits in your query!"
-	}
+	// Truncate to MaxResultLength characters (runes)
+	runes := []rune(jsonStr)
+	truncated := string(runes[:p.config.Query.MaxResultLength])
+	output.Rows = nil
+	output.Error = truncated + "...[truncated] Result is too long! Add limits in your query!"
 }
 
 // truncateForLog truncates a string for log output to avoid oversized log entries.

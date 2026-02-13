@@ -161,6 +161,16 @@ func (c *Checker) checkNode(node *pg_query.Node) error {
 			return fmt.Errorf("PREPARE statements are not allowed: prepared statements can be executed later bypassing protection checks")
 		}
 
+	case *pg_query.Node_ExecuteStmt:
+		if !c.config.AllowPrepare {
+			return fmt.Errorf("EXECUTE statements are not allowed: can execute prepared statements that bypass protection checks")
+		}
+
+	case *pg_query.Node_DeallocateStmt:
+		if !c.config.AllowPrepare {
+			return fmt.Errorf("DEALLOCATE statements are not allowed: managed under the same flag as PREPARE")
+		}
+
 	case *pg_query.Node_ExplainStmt:
 		if n.ExplainStmt.Query != nil {
 			if err := c.checkNode(n.ExplainStmt.Query); err != nil {
@@ -222,6 +232,11 @@ func (c *Checker) checkNode(node *pg_query.Node) error {
 	case *pg_query.Node_NotifyStmt:
 		if !c.config.AllowListenNotify {
 			return fmt.Errorf("NOTIFY is not allowed: can send arbitrary payloads to listening sessions")
+		}
+
+	case *pg_query.Node_UnlistenStmt:
+		if !c.config.AllowListenNotify {
+			return fmt.Errorf("UNLISTEN is not allowed: managed under the same flag as LISTEN/NOTIFY")
 		}
 
 	case *pg_query.Node_VacuumStmt:

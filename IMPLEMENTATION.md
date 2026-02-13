@@ -1129,7 +1129,8 @@ func WithServerHooks(hooks ServerHooksConfig) Option {
     }
 }
 
-// Close closes the connection pool. Accepts context for controlled shutdown.
+// Close closes the connection pool. Accepts context for API forward-compatibility,
+// but does not currently use it — pgxpool.Pool.Close() does not support context-based shutdown.
 func (p *PostgresMcp) Close(ctx context.Context)
 ```
 
@@ -1327,10 +1328,7 @@ func (p *PostgresMcp) Query(ctx context.Context, input QueryInput) *QueryOutput 
     // 12. Apply sanitization (per-field, recursive into JSONB/arrays)
     finalResult.Rows = p.sanitizer.SanitizeRows(finalResult.Rows)
 
-    // FIXME: Performance optimization — truncateIfNeeded calls json.Marshal(output.Rows)
-    // just to measure length. The MCP server will marshal the same data again when sending
-    // the response. Consider tracking result size during collectRows instead.
-    // 13. Apply max result length truncation (keeps partial data — may be garbled JSON but still useful for agents)
+    // 13. Apply max result length truncation in characters (keeps partial data — may be garbled JSON but still useful for agents)
     p.truncateIfNeeded(finalResult)
 
     // 14. Log successful query execution
@@ -1875,21 +1873,16 @@ func (p *PostgresMcp) handleError(err error) *QueryOutput {
 **truncateIfNeeded logic:**
 ```go
 func (p *PostgresMcp) truncateIfNeeded(output *QueryOutput) {
-    if p.config.Query.MaxResultLength <= 0 {
+    jsonBytes, _ := json.Marshal(output.Rows)
+    jsonStr := string(jsonBytes)
+    if utf8.RuneCountInString(jsonStr) <= p.config.Query.MaxResultLength {
         return
     }
-    jsonBytes, _ := json.Marshal(output.Rows)
-    if len(jsonBytes) > p.config.Query.MaxResultLength {
-        // Truncate at MaxResultLength bytes, then back up to the nearest
-        // valid UTF-8 boundary to avoid slicing mid-character.
-        truncateAt := p.config.Query.MaxResultLength
-        for truncateAt > 0 && !utf8.RuneStart(jsonBytes[truncateAt]) {
-            truncateAt--
-        }
-        truncated := string(jsonBytes[:truncateAt])
-        output.Rows = nil
-        output.Error = truncated + "...[truncated] Result is too long! Add limits in your query!"
-    }
+    // Truncate to MaxResultLength characters (runes)
+    runes := []rune(jsonStr)
+    truncated := string(runes[:p.config.Query.MaxResultLength])
+    output.Rows = nil
+    output.Error = truncated + "...[truncated] Result is too long! Add limits in your query!"
 }
 ```
 

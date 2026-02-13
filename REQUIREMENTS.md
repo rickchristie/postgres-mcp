@@ -175,7 +175,7 @@ Create Postgres MCP with Golang.
   - Log at Info level when an MCP session is terminated or client disconnects, including session duration.
   - In stateless mode (current default), log each initialize call. There is no explicit disconnect event — the session ends when the HTTP request completes.
 - Use zerolog as logger.
-- No graceful shutdown needed. If server is killed, close all connections immediately. `Close()` accepts a context parameter for library users who need controlled shutdown.
+- No graceful shutdown needed. If server is killed, close all connections immediately. `Close()` accepts a context parameter for API forward-compatibility, but does not currently use it — `pgxpool.Pool.Close()` does not support context-based shutdown.
 - Config validation panics on startup (not errors). This is intentional — both CLI and library mode are expected to initialize at application startup. Missing/invalid config values should crash immediately rather than produce subtle runtime failures. Library users call `New()` during initialization, so panics are caught at startup.
 
 # Sample config JSON
@@ -195,12 +195,12 @@ Create Postgres MCP with Golang.
       "max_conn_idle_time": "30m",
       "health_check_period": "1m"
     },
+    "read_only": false,
+    "timezone": "UTC",
     "server": {
       "port": 8080,
       "health_check_enabled": true,
-      "health_check_path": "/health-check",
-      "read_only": false,
-      "timezone": "UTC"
+      "health_check_path": "/health-check"
     },
     "logging": {
       "level": "info",

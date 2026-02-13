@@ -160,7 +160,7 @@ func TestLoadConfigValidation_HealthCheckPathEmpty(t *testing.T) {
 		t.Fatalf("unexpected error loading config: %v", err)
 	}
 
-	// Verify the loaded config would trigger the health check validation error
+	// Verify the loaded config would trigger the health check validation panic
 	// in runServe(): "health_check_path must be set when health_check_enabled is true"
 	if !loaded.Server.HealthCheckEnabled {
 		t.Fatal("expected health_check_enabled to be true")

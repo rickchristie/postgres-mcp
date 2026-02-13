@@ -381,6 +381,46 @@ func TestPrepare_Allowed(t *testing.T) {
 	assertAllowed(t, c, "PREPARE stmt AS SELECT 1")
 }
 
+// --- EXECUTE Protection ---
+
+func TestExecute_Basic(t *testing.T) {
+	t.Parallel()
+	c := NewChecker(defaultConfig())
+	assertBlocked(t, c, "EXECUTE stmt", "EXECUTE statements are not allowed: can execute prepared statements that bypass protection checks")
+}
+
+func TestExecute_WithParams(t *testing.T) {
+	t.Parallel()
+	c := NewChecker(defaultConfig())
+	assertBlocked(t, c, "EXECUTE stmt(1, 'test')", "EXECUTE statements are not allowed")
+}
+
+func TestExecute_Allowed(t *testing.T) {
+	t.Parallel()
+	c := NewChecker(Config{AllowPrepare: true})
+	assertAllowed(t, c, "EXECUTE stmt")
+}
+
+// --- DEALLOCATE Protection ---
+
+func TestDeallocate_Basic(t *testing.T) {
+	t.Parallel()
+	c := NewChecker(defaultConfig())
+	assertBlocked(t, c, "DEALLOCATE stmt", "DEALLOCATE statements are not allowed: managed under the same flag as PREPARE")
+}
+
+func TestDeallocate_All(t *testing.T) {
+	t.Parallel()
+	c := NewChecker(defaultConfig())
+	assertBlocked(t, c, "DEALLOCATE ALL", "DEALLOCATE statements are not allowed")
+}
+
+func TestDeallocate_Allowed(t *testing.T) {
+	t.Parallel()
+	c := NewChecker(Config{AllowPrepare: true})
+	assertAllowed(t, c, "DEALLOCATE stmt")
+}
+
 // --- EXPLAIN ANALYZE Protection ---
 
 func TestExplain_SelectAllowed(t *testing.T) {
@@ -831,6 +871,26 @@ func TestNotify_Allowed(t *testing.T) {
 	t.Parallel()
 	c := NewChecker(Config{AllowListenNotify: true})
 	assertAllowed(t, c, "NOTIFY my_channel, 'hello'")
+}
+
+// --- UNLISTEN Protection ---
+
+func TestUnlisten_Basic(t *testing.T) {
+	t.Parallel()
+	c := NewChecker(defaultConfig())
+	assertBlocked(t, c, "UNLISTEN my_channel", "UNLISTEN is not allowed: managed under the same flag as LISTEN/NOTIFY")
+}
+
+func TestUnlisten_All(t *testing.T) {
+	t.Parallel()
+	c := NewChecker(defaultConfig())
+	assertBlocked(t, c, "UNLISTEN *", "UNLISTEN is not allowed")
+}
+
+func TestUnlisten_Allowed(t *testing.T) {
+	t.Parallel()
+	c := NewChecker(Config{AllowListenNotify: true})
+	assertAllowed(t, c, "UNLISTEN my_channel")
 }
 
 // --- Maintenance Command Protection ---

@@ -165,6 +165,26 @@ func TestLoadConfigValidation_NegativeDescribeTableTimeout(t *testing.T) {
 	})
 }
 
+func TestLoadConfigValidation_NegativeMaxSQLLength(t *testing.T) {
+	t.Parallel()
+	config := validConfig()
+	config.Query.MaxSQLLength = -1
+
+	expectPanic(t, "max_sql_length", func() {
+		pgmcp.New(context.Background(), dummyConnString, config, configTestLogger())
+	})
+}
+
+func TestLoadConfigValidation_NegativeMaxResultLength(t *testing.T) {
+	t.Parallel()
+	config := validConfig()
+	config.Query.MaxResultLength = -1
+
+	expectPanic(t, "max_result_length", func() {
+		pgmcp.New(context.Background(), dummyConnString, config, configTestLogger())
+	})
+}
+
 func TestLoadConfigValidation_ZeroHookDefaultTimeout(t *testing.T) {
 	t.Parallel()
 	config := validConfig()

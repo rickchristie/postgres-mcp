@@ -77,7 +77,7 @@ func runServe() error {
 	// Health check endpoint (process liveness only, not DB connectivity)
 	if serverConfig.Server.HealthCheckEnabled {
 		if serverConfig.Server.HealthCheckPath == "" {
-			return fmt.Errorf("health_check_path must be set when health_check_enabled is true")
+			panic("gopgmcp: health_check_path must be set when health_check_enabled is true")
 		}
 		mux.HandleFunc(serverConfig.Server.HealthCheckPath, func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
