@@ -107,6 +107,8 @@ Regex patterns matched against error messages. Appends contextual guidance for A
 
 #### Install
 
+Requires [Go 1.24+](https://go.dev/doc/install). After installing Go:
+
 ```bash
 go install github.com/rickchristie/postgres-mcp/cmd/gopgmcp@latest
 ```
