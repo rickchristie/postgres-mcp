@@ -52,7 +52,8 @@ func WithServerHooks(h ServerHooksConfig) Option {
 // connString is the PostgreSQL connection string (must include credentials).
 // In library mode, connString is required — Config.Connection fields are ignored
 // (the CLI is responsible for building connString from Config.Connection + prompted credentials).
-// Panics on invalid config. Returns error only for runtime failures (e.g., pool creation).
+// Panics on invalid config values. Returns error for runtime failures (e.g., pool creation)
+// and invalid regex patterns in error_prompts, sanitization, timeout_rules, and server_hooks.
 func New(ctx context.Context, connString string, config Config, logger zerolog.Logger, opts ...Option) (*PostgresMcp, error) {
 	o := &options{}
 	for _, opt := range opts {
@@ -210,8 +211,14 @@ func New(ctx context.Context, connString string, config Config, logger zerolog.L
 		ReadOnly:                config.ReadOnly,
 	})
 
-	san := sanitize.NewSanitizer(mapSanitizationRules(config.Sanitization))
-	matcher := errprompt.NewMatcher(mapErrorPromptRules(config.ErrorPrompts))
+	san, err := sanitize.NewSanitizer(mapSanitizationRules(config.Sanitization))
+	if err != nil {
+		return nil, fmt.Errorf("invalid sanitization config: %w", err)
+	}
+	matcher, err := errprompt.NewMatcher(mapErrorPromptRules(config.ErrorPrompts))
+	if err != nil {
+		return nil, fmt.Errorf("invalid error_prompts config: %w", err)
+	}
 	timeoutRules := make([]timeout.Rule, len(config.Query.TimeoutRules))
 	for i, r := range config.Query.TimeoutRules {
 		timeoutRules[i] = timeout.Rule{
@@ -219,10 +226,13 @@ func New(ctx context.Context, connString string, config Config, logger zerolog.L
 			Timeout: time.Duration(r.TimeoutSeconds) * time.Second,
 		}
 	}
-	tmgr := timeout.NewManager(timeout.Config{
+	tmgr, err := timeout.NewManager(timeout.Config{
 		DefaultTimeout: time.Duration(config.Query.DefaultTimeoutSeconds) * time.Second,
 		Rules:          timeoutRules,
 	})
+	if err != nil {
+		return nil, fmt.Errorf("invalid timeout_rules config: %w", err)
+	}
 
 	// Initialize command hooks if configured
 	var cmdHooks *hooks.Runner
@@ -239,11 +249,14 @@ func New(ctx context.Context, connString string, config Config, logger zerolog.L
 			}
 			return result
 		}
-		cmdHooks = hooks.NewRunner(hooks.Config{
+		cmdHooks, err = hooks.NewRunner(hooks.Config{
 			DefaultTimeout: time.Duration(config.DefaultHookTimeoutSeconds) * time.Second,
 			BeforeQuery:    hookEntries(o.serverHooks.BeforeQuery),
 			AfterQuery:     hookEntries(o.serverHooks.AfterQuery),
 		}, logger)
+		if err != nil {
+			return nil, fmt.Errorf("invalid server_hooks config: %w", err)
+		}
 	}
 
 	return &PostgresMcp{

@@ -29,17 +29,17 @@ type Manager struct {
 	defaultTimeout time.Duration
 }
 
-// NewManager creates a new Manager. Panics on invalid regex patterns.
-func NewManager(config Config) *Manager {
+// NewManager creates a new Manager. Returns an error on invalid regex patterns.
+func NewManager(config Config) (*Manager, error) {
 	compiled := make([]compiledRule, len(config.Rules))
 	for i, r := range config.Rules {
 		re, err := regexp.Compile(r.Pattern)
 		if err != nil {
-			panic(fmt.Sprintf("timeout: invalid regex pattern %q: %v", r.Pattern, err))
+			return nil, fmt.Errorf("timeout: invalid regex pattern %q: %v", r.Pattern, err)
 		}
 		compiled[i] = compiledRule{pattern: re, timeout: r.Timeout}
 	}
-	return &Manager{rules: compiled, defaultTimeout: config.DefaultTimeout}
+	return &Manager{rules: compiled, defaultTimeout: config.DefaultTimeout}, nil
 }
 
 // GetTimeout returns the timeout for the given SQL.

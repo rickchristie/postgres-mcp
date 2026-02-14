@@ -58,18 +58,18 @@ type Runner struct {
 	logger         zerolog.Logger
 }
 
-// NewRunner creates a new Runner. Panics on invalid regex or invalid config.
-func NewRunner(config Config, logger zerolog.Logger) *Runner {
+// NewRunner creates a new Runner. Returns an error on invalid regex or invalid config.
+func NewRunner(config Config, logger zerolog.Logger) (*Runner, error) {
 	if config.DefaultTimeout == 0 && (len(config.BeforeQuery) > 0 || len(config.AfterQuery) > 0) {
-		panic("hooks: default_hook_timeout_seconds must be > 0 when hooks are configured")
+		return nil, fmt.Errorf("hooks: default_hook_timeout_seconds must be > 0 when hooks are configured")
 	}
 
-	compile := func(entries []HookEntry) []compiledHook {
+	compile := func(entries []HookEntry) ([]compiledHook, error) {
 		compiled := make([]compiledHook, len(entries))
 		for i, e := range entries {
 			re, err := regexp.Compile(e.Pattern)
 			if err != nil {
-				panic(fmt.Sprintf("hooks: invalid regex pattern %q: %v", e.Pattern, err))
+				return nil, fmt.Errorf("hooks: invalid regex pattern %q: %v", e.Pattern, err)
 			}
 			timeout := e.Timeout
 			if timeout == 0 {
@@ -82,15 +82,24 @@ func NewRunner(config Config, logger zerolog.Logger) *Runner {
 				timeout: timeout,
 			}
 		}
-		return compiled
+		return compiled, nil
+	}
+
+	beforeQuery, err := compile(config.BeforeQuery)
+	if err != nil {
+		return nil, err
+	}
+	afterQuery, err := compile(config.AfterQuery)
+	if err != nil {
+		return nil, err
 	}
 
 	return &Runner{
-		beforeQuery:    compile(config.BeforeQuery),
-		afterQuery:     compile(config.AfterQuery),
+		beforeQuery:    beforeQuery,
+		afterQuery:     afterQuery,
 		defaultTimeout: config.DefaultTimeout,
 		logger:         logger,
-	}
+	}, nil
 }
 
 // HasAfterQueryHooks returns true if any AfterQuery hooks are configured.

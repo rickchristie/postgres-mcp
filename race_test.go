@@ -12,10 +12,13 @@ import (
 )
 
 func TestRace_ConcurrentSanitization(t *testing.T) {
-	s := sanitize.NewSanitizer([]sanitize.Rule{
+	s, err := sanitize.NewSanitizer([]sanitize.Rule{
 		{Pattern: `\d{3}-\d{4}`, Replacement: "***-****"},
 		{Pattern: `\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b`, Replacement: "[REDACTED]"},
 	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	var wg sync.WaitGroup
 	for i := 0; i < 10; i++ {
@@ -64,11 +67,14 @@ func TestRace_ConcurrentProtectionCheck(t *testing.T) {
 }
 
 func TestRace_ConcurrentErrorPrompt(t *testing.T) {
-	m := errprompt.NewMatcher([]errprompt.Rule{
+	m, err := errprompt.NewMatcher([]errprompt.Rule{
 		{Pattern: `permission denied`, Message: "You don't have permission."},
 		{Pattern: `syntax error`, Message: "Check your SQL syntax."},
 		{Pattern: `does not exist`, Message: "The table or column may not exist."},
 	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	errors := []string{
 		"permission denied for table users",
@@ -94,7 +100,7 @@ func TestRace_ConcurrentErrorPrompt(t *testing.T) {
 }
 
 func TestRace_ConcurrentTimeout(t *testing.T) {
-	m := timeout.NewManager(timeout.Config{
+	m, err := timeout.NewManager(timeout.Config{
 		DefaultTimeout: 30 * time.Second,
 		Rules: []timeout.Rule{
 			{Pattern: `(?i)SELECT.*pg_sleep`, Timeout: 60 * time.Second},
@@ -102,6 +108,9 @@ func TestRace_ConcurrentTimeout(t *testing.T) {
 			{Pattern: `(?i)DELETE`, Timeout: 15 * time.Second},
 		},
 	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	queries := []string{
 		"SELECT pg_sleep(1)",

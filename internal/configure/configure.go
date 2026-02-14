@@ -505,7 +505,7 @@ func (p *prompter) promptNewField(name string) string {
 
 func (p *prompter) promptNewRegexField(name string) string {
 	for {
-		fmt.Fprintf(p.output, "  %s (regex): ", name)
+		fmt.Fprintf(p.output, "  %s [Go regex, e.g. .* for match-all, (?i)foo for case-insensitive]: ", name)
 		input := p.readLine()
 		if input == "" {
 			return ""

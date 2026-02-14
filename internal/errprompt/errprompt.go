@@ -22,17 +22,17 @@ type Matcher struct {
 	rules []compiledRule
 }
 
-// NewMatcher creates a new Matcher. Panics on invalid regex patterns.
-func NewMatcher(rules []Rule) *Matcher {
+// NewMatcher creates a new Matcher. Returns an error on invalid regex patterns.
+func NewMatcher(rules []Rule) (*Matcher, error) {
 	compiled := make([]compiledRule, len(rules))
 	for i, r := range rules {
 		re, err := regexp.Compile(r.Pattern)
 		if err != nil {
-			panic(fmt.Sprintf("errprompt: invalid regex pattern %q: %v", r.Pattern, err))
+			return nil, fmt.Errorf("errprompt: invalid regex pattern %q: %v", r.Pattern, err)
 		}
 		compiled[i] = compiledRule{pattern: re, message: r.Message}
 	}
-	return &Matcher{rules: compiled}
+	return &Matcher{rules: compiled}, nil
 }
 
 // Match checks error message against all rules (top to bottom).

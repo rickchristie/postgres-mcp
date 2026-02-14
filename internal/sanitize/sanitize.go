@@ -21,17 +21,17 @@ type Sanitizer struct {
 	rules []compiledRule
 }
 
-// NewSanitizer creates a new Sanitizer. Panics on invalid regex patterns.
-func NewSanitizer(rules []Rule) *Sanitizer {
+// NewSanitizer creates a new Sanitizer. Returns an error on invalid regex patterns.
+func NewSanitizer(rules []Rule) (*Sanitizer, error) {
 	compiled := make([]compiledRule, len(rules))
 	for i, r := range rules {
 		re, err := regexp.Compile(r.Pattern)
 		if err != nil {
-			panic(fmt.Sprintf("sanitize: invalid regex pattern %q: %v", r.Pattern, err))
+			return nil, fmt.Errorf("sanitize: invalid regex pattern %q: %v", r.Pattern, err)
 		}
 		compiled[i] = compiledRule{pattern: re, replacement: r.Replacement}
 	}
-	return &Sanitizer{rules: compiled}
+	return &Sanitizer{rules: compiled}, nil
 }
 
 // SanitizeRows applies sanitization to each field value in the result rows.

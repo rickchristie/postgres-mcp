@@ -66,17 +66,84 @@ func expectNoPanic(t *testing.T, f func()) {
 	f()
 }
 
-func TestLoadConfigInvalidRegex(t *testing.T) {
+func TestLoadConfigInvalidRegex_Sanitization(t *testing.T) {
 	t.Parallel()
 	config := validConfig()
 	config.Sanitization = []pgmcp.SanitizationRule{
 		{Pattern: "[invalid(regex", Replacement: "***"},
 	}
 
-	expectPanic(t, "regex", func() {
-		// NewSanitizer is called inside New(), which will panic on invalid regex
-		pgmcp.New(context.Background(), dummyConnString, config, configTestLogger())
-	})
+	_, err := pgmcp.New(context.Background(), dummyConnString, config, configTestLogger())
+	if err == nil {
+		t.Fatal("expected error for invalid regex pattern in sanitization")
+	}
+	if !strings.Contains(err.Error(), "invalid sanitization config") {
+		t.Fatalf("expected error to contain 'invalid sanitization config', got: %s", err)
+	}
+	if !strings.Contains(err.Error(), "invalid regex pattern") {
+		t.Fatalf("expected error to contain 'invalid regex pattern', got: %s", err)
+	}
+}
+
+func TestLoadConfigInvalidRegex_ErrorPrompts(t *testing.T) {
+	t.Parallel()
+	config := validConfig()
+	config.ErrorPrompts = []pgmcp.ErrorPromptRule{
+		{Pattern: "*", Message: "Please retry"},
+	}
+
+	_, err := pgmcp.New(context.Background(), dummyConnString, config, configTestLogger())
+	if err == nil {
+		t.Fatal("expected error for invalid regex pattern in error_prompts")
+	}
+	if !strings.Contains(err.Error(), "invalid error_prompts config") {
+		t.Fatalf("expected error to contain 'invalid error_prompts config', got: %s", err)
+	}
+	if !strings.Contains(err.Error(), "invalid regex pattern") {
+		t.Fatalf("expected error to contain 'invalid regex pattern', got: %s", err)
+	}
+}
+
+func TestLoadConfigInvalidRegex_TimeoutRules(t *testing.T) {
+	t.Parallel()
+	config := validConfig()
+	config.Query.TimeoutRules = []pgmcp.TimeoutRule{
+		{Pattern: "[bad", TimeoutSeconds: 10},
+	}
+
+	_, err := pgmcp.New(context.Background(), dummyConnString, config, configTestLogger())
+	if err == nil {
+		t.Fatal("expected error for invalid regex pattern in timeout_rules")
+	}
+	if !strings.Contains(err.Error(), "invalid timeout_rules config") {
+		t.Fatalf("expected error to contain 'invalid timeout_rules config', got: %s", err)
+	}
+	if !strings.Contains(err.Error(), "invalid regex pattern") {
+		t.Fatalf("expected error to contain 'invalid regex pattern', got: %s", err)
+	}
+}
+
+func TestLoadConfigInvalidRegex_ServerHooks(t *testing.T) {
+	t.Parallel()
+	config := validConfig()
+	config.DefaultHookTimeoutSeconds = 10
+
+	_, err := pgmcp.New(context.Background(), dummyConnString, config, configTestLogger(),
+		pgmcp.WithServerHooks(pgmcp.ServerHooksConfig{
+			BeforeQuery: []pgmcp.HookEntry{
+				{Pattern: "+invalid", Command: "dummy", TimeoutSeconds: 5},
+			},
+		}),
+	)
+	if err == nil {
+		t.Fatal("expected error for invalid regex pattern in server_hooks")
+	}
+	if !strings.Contains(err.Error(), "invalid server_hooks config") {
+		t.Fatalf("expected error to contain 'invalid server_hooks config', got: %s", err)
+	}
+	if !strings.Contains(err.Error(), "invalid regex pattern") {
+		t.Fatalf("expected error to contain 'invalid regex pattern', got: %s", err)
+	}
 }
 
 func TestLoadConfigValidation_ZeroMaxConns(t *testing.T) {

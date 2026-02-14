@@ -25,12 +25,15 @@ func hookScript(name string) string {
 
 func TestBeforeQuery_Accept(t *testing.T) {
 	t.Parallel()
-	r := NewRunner(Config{
+	r, err := NewRunner(Config{
 		DefaultTimeout: 5 * time.Second,
 		BeforeQuery: []HookEntry{
 			{Pattern: ".*", Command: hookScript("accept.sh")},
 		},
 	}, testLogger())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	result, err := r.RunBeforeQuery(context.Background(), "SELECT 1")
 	if err != nil {
@@ -43,14 +46,17 @@ func TestBeforeQuery_Accept(t *testing.T) {
 
 func TestBeforeQuery_Reject(t *testing.T) {
 	t.Parallel()
-	r := NewRunner(Config{
+	r, err := NewRunner(Config{
 		DefaultTimeout: 5 * time.Second,
 		BeforeQuery: []HookEntry{
 			{Pattern: ".*", Command: hookScript("reject.sh")},
 		},
 	}, testLogger())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
-	_, err := r.RunBeforeQuery(context.Background(), "SELECT 1")
+	_, err = r.RunBeforeQuery(context.Background(), "SELECT 1")
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -61,12 +67,15 @@ func TestBeforeQuery_Reject(t *testing.T) {
 
 func TestBeforeQuery_ModifyQuery(t *testing.T) {
 	t.Parallel()
-	r := NewRunner(Config{
+	r, err := NewRunner(Config{
 		DefaultTimeout: 5 * time.Second,
 		BeforeQuery: []HookEntry{
 			{Pattern: ".*", Command: hookScript("modify_query.sh")},
 		},
 	}, testLogger())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	result, err := r.RunBeforeQuery(context.Background(), "SELECT 1")
 	if err != nil {
@@ -79,12 +88,15 @@ func TestBeforeQuery_ModifyQuery(t *testing.T) {
 
 func TestBeforeQuery_PatternNoMatch(t *testing.T) {
 	t.Parallel()
-	r := NewRunner(Config{
+	r, err := NewRunner(Config{
 		DefaultTimeout: 5 * time.Second,
 		BeforeQuery: []HookEntry{
 			{Pattern: "NEVER_MATCH", Command: hookScript("reject.sh")},
 		},
 	}, testLogger())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	result, err := r.RunBeforeQuery(context.Background(), "SELECT 1")
 	if err != nil {
@@ -97,13 +109,16 @@ func TestBeforeQuery_PatternNoMatch(t *testing.T) {
 
 func TestBeforeQuery_Chaining(t *testing.T) {
 	t.Parallel()
-	r := NewRunner(Config{
+	r, err := NewRunner(Config{
 		DefaultTimeout: 5 * time.Second,
 		BeforeQuery: []HookEntry{
 			{Pattern: ".*", Command: hookScript("modify_query.sh")},
 			{Pattern: ".*", Command: hookScript("accept.sh")},
 		},
 	}, testLogger())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	result, err := r.RunBeforeQuery(context.Background(), "SELECT 1")
 	if err != nil {
@@ -117,15 +132,18 @@ func TestBeforeQuery_Chaining(t *testing.T) {
 
 func TestBeforeQuery_ChainPatternReEval(t *testing.T) {
 	t.Parallel()
-	r := NewRunner(Config{
+	r, err := NewRunner(Config{
 		DefaultTimeout: 5 * time.Second,
 		BeforeQuery: []HookEntry{
 			{Pattern: ".*", Command: hookScript("modify_query.sh")},
 			{Pattern: "modified", Command: hookScript("reject.sh")},
 		},
 	}, testLogger())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
-	_, err := r.RunBeforeQuery(context.Background(), "SELECT 1")
+	_, err = r.RunBeforeQuery(context.Background(), "SELECT 1")
 	if err == nil {
 		t.Fatal("expected error from second hook matching modified query")
 	}
@@ -136,14 +154,17 @@ func TestBeforeQuery_ChainPatternReEval(t *testing.T) {
 
 func TestBeforeQuery_Timeout(t *testing.T) {
 	t.Parallel()
-	r := NewRunner(Config{
+	r, err := NewRunner(Config{
 		DefaultTimeout: 1 * time.Second,
 		BeforeQuery: []HookEntry{
 			{Pattern: ".*", Command: hookScript("slow.sh")},
 		},
 	}, testLogger())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
-	_, err := r.RunBeforeQuery(context.Background(), "SELECT 1")
+	_, err = r.RunBeforeQuery(context.Background(), "SELECT 1")
 	if err == nil {
 		t.Fatal("expected timeout error")
 	}
@@ -154,14 +175,17 @@ func TestBeforeQuery_Timeout(t *testing.T) {
 
 func TestBeforeQuery_Crash(t *testing.T) {
 	t.Parallel()
-	r := NewRunner(Config{
+	r, err := NewRunner(Config{
 		DefaultTimeout: 5 * time.Second,
 		BeforeQuery: []HookEntry{
 			{Pattern: ".*", Command: hookScript("crash.sh")},
 		},
 	}, testLogger())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
-	_, err := r.RunBeforeQuery(context.Background(), "SELECT 1")
+	_, err = r.RunBeforeQuery(context.Background(), "SELECT 1")
 	if err == nil {
 		t.Fatal("expected crash error")
 	}
@@ -172,14 +196,17 @@ func TestBeforeQuery_Crash(t *testing.T) {
 
 func TestBeforeQuery_UnparseableResponse(t *testing.T) {
 	t.Parallel()
-	r := NewRunner(Config{
+	r, err := NewRunner(Config{
 		DefaultTimeout: 5 * time.Second,
 		BeforeQuery: []HookEntry{
 			{Pattern: ".*", Command: hookScript("bad_json.sh")},
 		},
 	}, testLogger())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
-	_, err := r.RunBeforeQuery(context.Background(), "SELECT 1")
+	_, err = r.RunBeforeQuery(context.Background(), "SELECT 1")
 	if err == nil {
 		t.Fatal("expected unparseable response error")
 	}
@@ -192,12 +219,15 @@ func TestBeforeQuery_UnparseableResponse(t *testing.T) {
 
 func TestAfterQuery_Accept(t *testing.T) {
 	t.Parallel()
-	r := NewRunner(Config{
+	r, err := NewRunner(Config{
 		DefaultTimeout: 5 * time.Second,
 		AfterQuery: []HookEntry{
 			{Pattern: ".*", Command: hookScript("accept.sh")},
 		},
 	}, testLogger())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	result, err := r.RunAfterQuery(context.Background(), `{"columns":["a"],"rows":[]}`)
 	if err != nil {
@@ -210,14 +240,17 @@ func TestAfterQuery_Accept(t *testing.T) {
 
 func TestAfterQuery_Reject(t *testing.T) {
 	t.Parallel()
-	r := NewRunner(Config{
+	r, err := NewRunner(Config{
 		DefaultTimeout: 5 * time.Second,
 		AfterQuery: []HookEntry{
 			{Pattern: ".*", Command: hookScript("reject.sh")},
 		},
 	}, testLogger())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
-	_, err := r.RunAfterQuery(context.Background(), `{"columns":["a"],"rows":[]}`)
+	_, err = r.RunAfterQuery(context.Background(), `{"columns":["a"],"rows":[]}`)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -228,12 +261,15 @@ func TestAfterQuery_Reject(t *testing.T) {
 
 func TestAfterQuery_ModifyResult(t *testing.T) {
 	t.Parallel()
-	r := NewRunner(Config{
+	r, err := NewRunner(Config{
 		DefaultTimeout: 5 * time.Second,
 		AfterQuery: []HookEntry{
 			{Pattern: ".*", Command: hookScript("modify_result.sh")},
 		},
 	}, testLogger())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	result, err := r.RunAfterQuery(context.Background(), `{"columns":["a"],"rows":[]}`)
 	if err != nil {
@@ -246,13 +282,16 @@ func TestAfterQuery_ModifyResult(t *testing.T) {
 
 func TestAfterQuery_Chaining(t *testing.T) {
 	t.Parallel()
-	r := NewRunner(Config{
+	r, err := NewRunner(Config{
 		DefaultTimeout: 5 * time.Second,
 		AfterQuery: []HookEntry{
 			{Pattern: ".*", Command: hookScript("modify_result.sh")},
 			{Pattern: ".*", Command: hookScript("accept.sh")},
 		},
 	}, testLogger())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	result, err := r.RunAfterQuery(context.Background(), `{"columns":["a"],"rows":[]}`)
 	if err != nil {
@@ -265,14 +304,17 @@ func TestAfterQuery_Chaining(t *testing.T) {
 
 func TestAfterQuery_Timeout(t *testing.T) {
 	t.Parallel()
-	r := NewRunner(Config{
+	r, err := NewRunner(Config{
 		DefaultTimeout: 1 * time.Second,
 		AfterQuery: []HookEntry{
 			{Pattern: ".*", Command: hookScript("slow.sh")},
 		},
 	}, testLogger())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
-	_, err := r.RunAfterQuery(context.Background(), `{"columns":["a"],"rows":[]}`)
+	_, err = r.RunAfterQuery(context.Background(), `{"columns":["a"],"rows":[]}`)
 	if err == nil {
 		t.Fatal("expected timeout error")
 	}
@@ -283,14 +325,17 @@ func TestAfterQuery_Timeout(t *testing.T) {
 
 func TestAfterQuery_Crash(t *testing.T) {
 	t.Parallel()
-	r := NewRunner(Config{
+	r, err := NewRunner(Config{
 		DefaultTimeout: 5 * time.Second,
 		AfterQuery: []HookEntry{
 			{Pattern: ".*", Command: hookScript("crash.sh")},
 		},
 	}, testLogger())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
-	_, err := r.RunAfterQuery(context.Background(), `{"columns":["a"],"rows":[]}`)
+	_, err = r.RunAfterQuery(context.Background(), `{"columns":["a"],"rows":[]}`)
 	if err == nil {
 		t.Fatal("expected crash error")
 	}
@@ -301,14 +346,17 @@ func TestAfterQuery_Crash(t *testing.T) {
 
 func TestAfterQuery_UnparseableResponse(t *testing.T) {
 	t.Parallel()
-	r := NewRunner(Config{
+	r, err := NewRunner(Config{
 		DefaultTimeout: 5 * time.Second,
 		AfterQuery: []HookEntry{
 			{Pattern: ".*", Command: hookScript("bad_json.sh")},
 		},
 	}, testLogger())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
-	_, err := r.RunAfterQuery(context.Background(), `{"columns":["a"],"rows":[]}`)
+	_, err = r.RunAfterQuery(context.Background(), `{"columns":["a"],"rows":[]}`)
 	if err == nil {
 		t.Fatal("expected unparseable response error")
 	}
@@ -321,12 +369,15 @@ func TestAfterQuery_UnparseableResponse(t *testing.T) {
 
 func TestHookStdinInput(t *testing.T) {
 	t.Parallel()
-	r := NewRunner(Config{
+	r, err := NewRunner(Config{
 		DefaultTimeout: 5 * time.Second,
 		BeforeQuery: []HookEntry{
 			{Pattern: ".*", Command: hookScript("echo_stdin.sh")},
 		},
 	}, testLogger())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	result, err := r.RunBeforeQuery(context.Background(), "SELECT * FROM users WHERE id = 42")
 	if err != nil {
@@ -339,12 +390,15 @@ func TestHookStdinInput(t *testing.T) {
 
 func TestHookWithArgs(t *testing.T) {
 	t.Parallel()
-	r := NewRunner(Config{
+	r, err := NewRunner(Config{
 		DefaultTimeout: 5 * time.Second,
 		BeforeQuery: []HookEntry{
 			{Pattern: ".*", Command: hookScript("echo_args.sh"), Args: []string{"--flag", "value"}},
 		},
 	}, testLogger())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	result, err := r.RunBeforeQuery(context.Background(), "SELECT 1")
 	if err != nil {
@@ -357,12 +411,15 @@ func TestHookWithArgs(t *testing.T) {
 
 func TestHookWithEmptyArgs(t *testing.T) {
 	t.Parallel()
-	r := NewRunner(Config{
+	r, err := NewRunner(Config{
 		DefaultTimeout: 5 * time.Second,
 		BeforeQuery: []HookEntry{
 			{Pattern: ".*", Command: hookScript("accept.sh"), Args: []string{}},
 		},
 	}, testLogger())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	result, err := r.RunBeforeQuery(context.Background(), "SELECT 1")
 	if err != nil {
@@ -375,14 +432,17 @@ func TestHookWithEmptyArgs(t *testing.T) {
 
 func TestHookDefaultTimeout(t *testing.T) {
 	t.Parallel()
-	r := NewRunner(Config{
+	r, err := NewRunner(Config{
 		DefaultTimeout: 1 * time.Second,
 		BeforeQuery: []HookEntry{
 			{Pattern: ".*", Command: hookScript("slow.sh")}, // no per-hook timeout, uses default
 		},
 	}, testLogger())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
-	_, err := r.RunBeforeQuery(context.Background(), "SELECT 1")
+	_, err = r.RunBeforeQuery(context.Background(), "SELECT 1")
 	if err == nil {
 		t.Fatal("expected timeout error (default timeout)")
 	}
@@ -393,15 +453,18 @@ func TestHookDefaultTimeout(t *testing.T) {
 
 func TestHookPerHookTimeoutOverridesDefault(t *testing.T) {
 	t.Parallel()
-	r := NewRunner(Config{
+	r, err := NewRunner(Config{
 		DefaultTimeout: 1 * time.Second,
 		BeforeQuery: []HookEntry{
 			{Pattern: ".*", Command: hookScript("slow.sh"), Timeout: 2 * time.Second}, // per-hook 2s, still times out (sleep 30)
 		},
 	}, testLogger())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	start := time.Now()
-	_, err := r.RunBeforeQuery(context.Background(), "SELECT 1")
+	_, err = r.RunBeforeQuery(context.Background(), "SELECT 1")
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -413,35 +476,33 @@ func TestHookPerHookTimeoutOverridesDefault(t *testing.T) {
 	}
 }
 
-func TestHookPanicOnZeroDefaultTimeout(t *testing.T) {
+func TestNewRunnerErrorsOnZeroDefaultTimeout(t *testing.T) {
 	t.Parallel()
-	defer func() {
-		r := recover()
-		if r == nil {
-			t.Fatal("expected panic")
-		}
-		msg, ok := r.(string)
-		if !ok || !strings.Contains(msg, "default_hook_timeout_seconds") {
-			t.Fatalf("expected panic about default_hook_timeout_seconds, got %v", r)
-		}
-	}()
-
-	NewRunner(Config{
+	_, err := NewRunner(Config{
 		DefaultTimeout: 0,
 		BeforeQuery: []HookEntry{
 			{Pattern: ".*", Command: "dummy"},
 		},
 	}, testLogger())
+	if err == nil {
+		t.Fatal("expected error for zero default timeout")
+	}
+	if !strings.Contains(err.Error(), "default_hook_timeout_seconds") {
+		t.Fatalf("expected error about default_hook_timeout_seconds, got %v", err)
+	}
 }
 
 func TestHasAfterQueryHooks_True(t *testing.T) {
 	t.Parallel()
-	r := NewRunner(Config{
+	r, err := NewRunner(Config{
 		DefaultTimeout: 5 * time.Second,
 		AfterQuery: []HookEntry{
 			{Pattern: ".*", Command: "dummy"},
 		},
 	}, testLogger())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	if !r.HasAfterQueryHooks() {
 		t.Fatal("expected HasAfterQueryHooks to return true")
@@ -450,40 +511,36 @@ func TestHasAfterQueryHooks_True(t *testing.T) {
 
 func TestHasAfterQueryHooks_False(t *testing.T) {
 	t.Parallel()
-	r := NewRunner(Config{
+	r, err := NewRunner(Config{
 		DefaultTimeout: 5 * time.Second,
 		BeforeQuery: []HookEntry{
 			{Pattern: ".*", Command: "dummy"},
 		},
 	}, testLogger())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	if r.HasAfterQueryHooks() {
 		t.Fatal("expected HasAfterQueryHooks to return false")
 	}
 }
 
-func TestNewRunnerPanicsOnInvalidRegex(t *testing.T) {
+func TestNewRunnerErrorsOnInvalidRegex(t *testing.T) {
 	t.Parallel()
-	defer func() {
-		r := recover()
-		if r == nil {
-			t.Fatal("expected panic for invalid regex pattern")
-		}
-		msg, ok := r.(string)
-		if !ok {
-			t.Fatalf("expected string panic, got %T: %v", r, r)
-		}
-		if !strings.Contains(msg, "invalid regex pattern") {
-			t.Fatalf("expected panic message to contain 'invalid regex pattern', got: %s", msg)
-		}
-		if !strings.Contains(msg, "[invalid") {
-			t.Fatalf("expected panic message to contain the invalid pattern, got: %s", msg)
-		}
-	}()
-	NewRunner(Config{
+	_, err := NewRunner(Config{
 		DefaultTimeout: 5 * time.Second,
 		BeforeQuery: []HookEntry{
 			{Pattern: `[invalid`, Command: "dummy"},
 		},
 	}, testLogger())
+	if err == nil {
+		t.Fatal("expected error for invalid regex pattern")
+	}
+	if !strings.Contains(err.Error(), "invalid regex pattern") {
+		t.Fatalf("expected error to contain 'invalid regex pattern', got: %s", err)
+	}
+	if !strings.Contains(err.Error(), "[invalid") {
+		t.Fatalf("expected error to contain the invalid pattern, got: %s", err)
+	}
 }
