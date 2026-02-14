@@ -465,3 +465,86 @@ func TestListTables_InternalTimeout(t *testing.T) {
 		t.Fatalf("expected deadline exceeded or canceling statement error, got %q", errMsg)
 	}
 }
+
+// rejectAllBeforeHook is a BeforeQueryHook that rejects every query.
+type rejectAllBeforeHook struct{}
+
+func (h *rejectAllBeforeHook) Run(ctx context.Context, query string) (string, error) {
+	return "", fmt.Errorf("hook rejected: %s", query)
+}
+
+func TestListTables_BypassesHookProtectionSanitizationPipeline(t *testing.T) {
+	t.Parallel()
+
+	// Configure hooks that reject all queries, strict protection (all blocked),
+	// and sanitization rules — ListTables must bypass all of them.
+	config := defaultConfig()
+	config.Protection.AllowDDL = true // only for setupTable
+	config.DefaultHookTimeoutSeconds = 5
+	config.BeforeQueryHooks = []pgmcp.BeforeQueryHookEntry{
+		{
+			Name: "reject_all",
+			Hook: &rejectAllBeforeHook{},
+		},
+	}
+	config.Sanitization = []pgmcp.SanitizationRule{
+		{
+			Pattern:     `.*`,
+			Replacement: "REDACTED",
+			Description: "redact everything",
+		},
+	}
+
+	// We need a setup instance first (without hooks) to create tables.
+	setupConfig := defaultConfig()
+	setupConfig.Protection.AllowDDL = true
+	setupP, connStr := newTestInstance(t, setupConfig)
+	setupTable(t, setupP, "CREATE TABLE lt_bypass_test (id serial PRIMARY KEY, name text)")
+	setupP.Close(context.Background())
+
+	// Now create instance with hooks/sanitization — ListTables must still work.
+	ctx := context.Background()
+	p, err := pgmcp.New(ctx, connStr, config, testLogger())
+	if err != nil {
+		t.Fatalf("failed to create instance: %v", err)
+	}
+	t.Cleanup(func() { p.Close(ctx) })
+
+	output, err := p.ListTables(ctx, pgmcp.ListTablesInput{})
+	if err != nil {
+		t.Fatalf("ListTables should bypass hooks/protection/sanitization pipeline, but got error: %v", err)
+	}
+
+	// Verify the table is present and fields are NOT sanitized.
+	found := false
+	for _, table := range output.Tables {
+		if table.Name == "lt_bypass_test" {
+			found = true
+			if table.Schema != "public" {
+				t.Fatalf("expected schema 'public', got %q", table.Schema)
+			}
+			if table.Type != "table" {
+				t.Fatalf("expected type 'table', got %q", table.Type)
+			}
+			if table.Owner == "" {
+				t.Fatal("expected non-empty owner")
+			}
+			if table.Owner == "REDACTED" {
+				t.Fatal("owner should NOT be sanitized — ListTables bypasses sanitization pipeline")
+			}
+			break
+		}
+	}
+	if !found {
+		t.Fatal("expected to find lt_bypass_test in ListTables output")
+	}
+
+	// Verify that Query IS blocked by the hook (proving the hook is active).
+	queryOutput := p.Query(ctx, pgmcp.QueryInput{SQL: "SELECT 1"})
+	if queryOutput.Error == "" {
+		t.Fatal("expected Query to be rejected by hook, but it succeeded")
+	}
+	if !strings.Contains(queryOutput.Error, "hook rejected") {
+		t.Fatalf("expected 'hook rejected' in error, got %q", queryOutput.Error)
+	}
+}

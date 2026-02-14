@@ -1,6 +1,7 @@
 package pgmcp_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	pgmcp "github.com/rickchristie/postgres-mcp"
+	"github.com/rs/zerolog"
 )
 
 // --- Query Tool Integration Tests ---
@@ -1873,6 +1875,383 @@ func TestQuery_AlterExtensionBlocked(t *testing.T) {
 	}
 }
 
+// --- Gap 5: Command-mode AfterQuery timeout triggers rollback for writes ---
+
+func TestQuery_CmdAfterHookTimeoutRollbacksInsert(t *testing.T) {
+	t.Parallel()
+	setupConfig := defaultConfig()
+	setupConfig.Protection.AllowDDL = true
+	setupP, connStr := newTestInstance(t, setupConfig)
+	setupTable(t, setupP, "CREATE TABLE cmd_timeout_insert (id serial PRIMARY KEY, name text)")
+	setupP.Close(context.Background())
+
+	config := defaultConfig()
+	config.DefaultHookTimeoutSeconds = 1
+	ctx := context.Background()
+	p, err := pgmcp.New(ctx, connStr, config, testLogger(), pgmcp.WithServerHooks(pgmcp.ServerHooksConfig{
+		AfterQuery: []pgmcp.HookEntry{
+			{Pattern: ".*", Command: hookScript("slow.sh")},
+		},
+	}))
+	if err != nil {
+		t.Fatalf("Failed to create PostgresMcp: %v", err)
+	}
+	defer p.Close(ctx)
+
+	output := p.Query(ctx, pgmcp.QueryInput{SQL: "INSERT INTO cmd_timeout_insert (name) VALUES ('should_rollback') RETURNING *"})
+	if output.Error == "" {
+		t.Fatal("expected hook timeout error")
+	}
+	if !strings.Contains(output.Error, "hook timed out") {
+		t.Fatalf("expected 'hook timed out' in error, got %q", output.Error)
+	}
+
+	// Verify the row was NOT inserted (rollback happened)
+	verifyConfig := defaultConfig()
+	verifyP, err := pgmcp.New(ctx, connStr, verifyConfig, testLogger())
+	if err != nil {
+		t.Fatalf("Failed to create verify instance: %v", err)
+	}
+	defer verifyP.Close(ctx)
+
+	verifyOutput := verifyP.Query(ctx, pgmcp.QueryInput{SQL: "SELECT count(*) AS cnt FROM cmd_timeout_insert"})
+	if verifyOutput.Error != "" {
+		t.Fatalf("verification query failed: %s", verifyOutput.Error)
+	}
+	if verifyOutput.Rows[0]["cnt"] != int64(0) {
+		t.Fatalf("expected 0 rows (rollback), got %v", verifyOutput.Rows[0]["cnt"])
+	}
+}
+
+// --- Gap 6: Command-mode AfterQuery reject rollback for UPDATE and DELETE ---
+
+func TestQuery_CmdAfterHookRejectRollbacksUpdate(t *testing.T) {
+	t.Parallel()
+	setupConfig := defaultConfig()
+	setupConfig.Protection.AllowDDL = true
+	setupP, connStr := newTestInstance(t, setupConfig)
+	setupTable(t, setupP, "CREATE TABLE cmd_reject_update (id serial PRIMARY KEY, name text)")
+	setupTable(t, setupP, "INSERT INTO cmd_reject_update (name) VALUES ('original')")
+	setupP.Close(context.Background())
+
+	config := defaultConfig()
+	config.DefaultHookTimeoutSeconds = 5
+	config.Protection.AllowUpdateWithoutWhere = true
+	ctx := context.Background()
+	p, err := pgmcp.New(ctx, connStr, config, testLogger(), pgmcp.WithServerHooks(pgmcp.ServerHooksConfig{
+		AfterQuery: []pgmcp.HookEntry{
+			{Pattern: ".*", Command: hookScript("reject.sh")},
+		},
+	}))
+	if err != nil {
+		t.Fatalf("Failed to create PostgresMcp: %v", err)
+	}
+	defer p.Close(ctx)
+
+	output := p.Query(ctx, pgmcp.QueryInput{SQL: "UPDATE cmd_reject_update SET name = 'changed' WHERE id = 1"})
+	if output.Error == "" {
+		t.Fatal("expected hook rejection error")
+	}
+	if !strings.Contains(output.Error, "rejected by test hook") {
+		t.Fatalf("expected rejection message, got %q", output.Error)
+	}
+
+	// Verify row was NOT updated (rollback happened)
+	verifyConfig := defaultConfig()
+	verifyP, err := pgmcp.New(ctx, connStr, verifyConfig, testLogger())
+	if err != nil {
+		t.Fatalf("Failed to create verify instance: %v", err)
+	}
+	defer verifyP.Close(ctx)
+
+	verifyOutput := verifyP.Query(ctx, pgmcp.QueryInput{SQL: "SELECT name FROM cmd_reject_update WHERE id = 1"})
+	if verifyOutput.Error != "" {
+		t.Fatalf("verification query failed: %s", verifyOutput.Error)
+	}
+	if verifyOutput.Rows[0]["name"] != "original" {
+		t.Fatalf("expected 'original' (rollback), got %v", verifyOutput.Rows[0]["name"])
+	}
+}
+
+func TestQuery_CmdAfterHookRejectRollbacksDelete(t *testing.T) {
+	t.Parallel()
+	setupConfig := defaultConfig()
+	setupConfig.Protection.AllowDDL = true
+	setupP, connStr := newTestInstance(t, setupConfig)
+	setupTable(t, setupP, "CREATE TABLE cmd_reject_delete (id serial PRIMARY KEY, name text)")
+	setupTable(t, setupP, "INSERT INTO cmd_reject_delete (name) VALUES ('keep_me')")
+	setupP.Close(context.Background())
+
+	config := defaultConfig()
+	config.DefaultHookTimeoutSeconds = 5
+	ctx := context.Background()
+	p, err := pgmcp.New(ctx, connStr, config, testLogger(), pgmcp.WithServerHooks(pgmcp.ServerHooksConfig{
+		AfterQuery: []pgmcp.HookEntry{
+			{Pattern: ".*", Command: hookScript("reject.sh")},
+		},
+	}))
+	if err != nil {
+		t.Fatalf("Failed to create PostgresMcp: %v", err)
+	}
+	defer p.Close(ctx)
+
+	output := p.Query(ctx, pgmcp.QueryInput{SQL: "DELETE FROM cmd_reject_delete WHERE id = 1"})
+	if output.Error == "" {
+		t.Fatal("expected hook rejection error")
+	}
+	if !strings.Contains(output.Error, "rejected by test hook") {
+		t.Fatalf("expected rejection message, got %q", output.Error)
+	}
+
+	// Verify row was NOT deleted (rollback happened)
+	verifyConfig := defaultConfig()
+	verifyP, err := pgmcp.New(ctx, connStr, verifyConfig, testLogger())
+	if err != nil {
+		t.Fatalf("Failed to create verify instance: %v", err)
+	}
+	defer verifyP.Close(ctx)
+
+	verifyOutput := verifyP.Query(ctx, pgmcp.QueryInput{SQL: "SELECT count(*) AS cnt FROM cmd_reject_delete"})
+	if verifyOutput.Error != "" {
+		t.Fatalf("verification query failed: %s", verifyOutput.Error)
+	}
+	if verifyOutput.Rows[0]["cnt"] != int64(1) {
+		t.Fatalf("expected 1 row (rollback), got %v", verifyOutput.Rows[0]["cnt"])
+	}
+}
+
+// --- Gap 7: Command-mode BeforeQuery multi-hook chaining (integration) ---
+
+func TestQuery_CmdBeforeHookChaining(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.Protection.AllowDDL = true
+	config.DefaultHookTimeoutSeconds = 5
+
+	setupConfig := defaultConfig()
+	setupConfig.Protection.AllowDDL = true
+	setupP, connStr := newTestInstance(t, setupConfig)
+	setupTable(t, setupP, "CREATE TABLE chain_test (id serial PRIMARY KEY, name text)")
+	setupTable(t, setupP, "INSERT INTO chain_test (name) VALUES ('Alice'), ('Bob'), ('Charlie')")
+	setupP.Close(context.Background())
+
+	// Chain: modify_query.sh rewrites to "SELECT 1 AS modified",
+	// then add_limit.sh appends "LIMIT 1" since it contains SELECT.
+	// Final query: "SELECT 1 AS modified LIMIT 1"
+	ctx := context.Background()
+	p, err := pgmcp.New(ctx, connStr, config, testLogger(), pgmcp.WithServerHooks(pgmcp.ServerHooksConfig{
+		BeforeQuery: []pgmcp.HookEntry{
+			{Pattern: ".*", Command: hookScript("modify_query.sh")},
+			{Pattern: "(?i)SELECT", Command: hookScript("add_limit.sh")},
+		},
+	}))
+	if err != nil {
+		t.Fatalf("Failed to create PostgresMcp: %v", err)
+	}
+	defer p.Close(ctx)
+
+	output := p.Query(ctx, pgmcp.QueryInput{SQL: "SELECT * FROM chain_test"})
+	if output.Error != "" {
+		t.Fatalf("unexpected error: %s", output.Error)
+	}
+	// First hook rewrites to "SELECT 1 AS modified"
+	// Second hook appends " LIMIT 1"
+	// Result should be single row with column "modified"
+	if len(output.Rows) != 1 {
+		t.Fatalf("expected 1 row (LIMIT 1 from chained hook), got %d", len(output.Rows))
+	}
+	if len(output.Columns) != 1 || output.Columns[0] != "modified" {
+		t.Fatalf("expected column 'modified' from first hook rewrite, got %v", output.Columns)
+	}
+}
+
+// --- Gap 8: Command-mode AfterQuery multi-hook chaining (integration) ---
+
+func TestQuery_CmdAfterHookChaining(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.Protection.AllowDDL = true
+	config.DefaultHookTimeoutSeconds = 5
+
+	setupConfig := defaultConfig()
+	setupConfig.Protection.AllowDDL = true
+	setupP, connStr := newTestInstance(t, setupConfig)
+	setupTable(t, setupP, "CREATE TABLE after_chain_test (id serial PRIMARY KEY, name text)")
+	setupTable(t, setupP, "INSERT INTO after_chain_test (name) VALUES ('Alice')")
+	setupP.Close(context.Background())
+
+	// Chain two AfterQuery hooks: first modifies result, second accepts.
+	// modify_result.sh replaces with {"columns":["modified"],"rows":[{"modified":true}]}
+	// accept.sh just accepts (passes through).
+	ctx := context.Background()
+	p, err := pgmcp.New(ctx, connStr, config, testLogger(), pgmcp.WithServerHooks(pgmcp.ServerHooksConfig{
+		AfterQuery: []pgmcp.HookEntry{
+			{Pattern: ".*", Command: hookScript("modify_result.sh")},
+			{Pattern: ".*", Command: hookScript("accept.sh")},
+		},
+	}))
+	if err != nil {
+		t.Fatalf("Failed to create PostgresMcp: %v", err)
+	}
+	defer p.Close(ctx)
+
+	output := p.Query(ctx, pgmcp.QueryInput{SQL: "SELECT * FROM after_chain_test"})
+	if output.Error != "" {
+		t.Fatalf("unexpected error: %s", output.Error)
+	}
+	// First hook modified result to {"columns":["modified"],"rows":[{"modified":true}]}
+	// Second hook accepted the modified result
+	if len(output.Columns) != 1 || output.Columns[0] != "modified" {
+		t.Fatalf("expected column 'modified' from first AfterQuery hook, got %v", output.Columns)
+	}
+	if len(output.Rows) != 1 {
+		t.Fatalf("expected 1 row from modified result, got %d", len(output.Rows))
+	}
+}
+
+// --- Gap 9: Read-only mode blocks SET transaction_read_only (integration) ---
+
+func TestQuery_ReadOnlyBlocksSetTransactionReadOnly(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.ReadOnly = true
+	config.Protection.AllowSet = true
+	p, _ := newTestInstance(t, config)
+
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "SET transaction_read_only = false"})
+	if output.Error == "" {
+		t.Fatal("expected error for SET transaction_read_only in read-only mode")
+	}
+	if !strings.Contains(output.Error, "transaction_read_only") {
+		t.Fatalf("expected error about transaction_read_only, got %q", output.Error)
+	}
+}
+
+// --- Gap 10: JSONB sanitization integration test with real DB ---
+
+func TestQuery_SanitizationJSONBIntegration(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.Protection.AllowDDL = true
+	config.Sanitization = []pgmcp.SanitizationRule{
+		{
+			Pattern:     `(\+62)\d{6,}(\d{3})`,
+			Replacement: "${1}xxx${2}",
+			Description: "Mask Indonesian phone numbers",
+		},
+		{
+			Pattern:     `(\d{4})\d{8}(\d{4})`,
+			Replacement: "${1}********${2}",
+			Description: "Mask 16-digit numbers",
+		},
+	}
+	p, _ := newTestInstance(t, config)
+
+	// Create table with JSONB, text, and array columns containing PII data
+	setupTable(t, p, `CREATE TABLE sanitize_jsonb_test (
+		id serial PRIMARY KEY,
+		profile jsonb,
+		tags text[],
+		phone text
+	)`)
+	setupTable(t, p, `INSERT INTO sanitize_jsonb_test (profile, tags, phone) VALUES
+		('{"name": "Alice", "phone": "+6282123344789", "card": "1234567890121234"}', ARRAY['+6282123344789', 'no-pii'], '+6282123344789'),
+		('{"contacts": [{"phone": "+6289999999123"}, {"phone": "+6281111111456"}], "nested": {"deep": "+6282222222789"}}', ARRAY['clean'], '+6289999999123'),
+		('{"simple": "no pii here"}', ARRAY['also clean'], 'not-a-phone')
+	`)
+
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "SELECT id, profile, tags, phone FROM sanitize_jsonb_test ORDER BY id"})
+	if output.Error != "" {
+		t.Fatalf("unexpected error: %s", output.Error)
+	}
+	if len(output.Rows) != 3 {
+		t.Fatalf("expected 3 rows, got %d", len(output.Rows))
+	}
+
+	// Row 1: JSONB object with phone and card number
+	profile1, ok := output.Rows[0]["profile"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected map for profile, got %T: %v", output.Rows[0]["profile"], output.Rows[0]["profile"])
+	}
+	if profile1["phone"] != "+62xxx789" {
+		t.Fatalf("expected JSONB phone masked to '+62xxx789', got %v", profile1["phone"])
+	}
+	if profile1["card"] != "1234********1234" {
+		t.Fatalf("expected JSONB card masked to '1234********1234', got %v", profile1["card"])
+	}
+	if profile1["name"] != "Alice" {
+		t.Fatalf("expected name 'Alice' unchanged, got %v", profile1["name"])
+	}
+
+	// Row 1: text column masked
+	if output.Rows[0]["phone"] != "+62xxx789" {
+		t.Fatalf("expected phone column masked to '+62xxx789', got %v", output.Rows[0]["phone"])
+	}
+
+	// Row 1: array column values masked
+	tags1, ok := output.Rows[0]["tags"].([]interface{})
+	if !ok {
+		t.Fatalf("expected []interface{} for tags, got %T", output.Rows[0]["tags"])
+	}
+	if len(tags1) != 2 {
+		t.Fatalf("expected 2 tags, got %d", len(tags1))
+	}
+	if tags1[0] != "+62xxx789" {
+		t.Fatalf("expected first tag masked to '+62xxx789', got %v", tags1[0])
+	}
+	if tags1[1] != "no-pii" {
+		t.Fatalf("expected second tag unchanged 'no-pii', got %v", tags1[1])
+	}
+
+	// Row 2: nested JSONB with array of objects
+	profile2, ok := output.Rows[1]["profile"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected map for profile, got %T: %v", output.Rows[1]["profile"], output.Rows[1]["profile"])
+	}
+	contacts, ok := profile2["contacts"].([]interface{})
+	if !ok {
+		t.Fatalf("expected contacts array, got %T", profile2["contacts"])
+	}
+	if len(contacts) != 2 {
+		t.Fatalf("expected 2 contacts, got %d", len(contacts))
+	}
+	contact0, ok := contacts[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected map for contact, got %T", contacts[0])
+	}
+	if contact0["phone"] != "+62xxx123" {
+		t.Fatalf("expected nested contact phone masked to '+62xxx123', got %v", contact0["phone"])
+	}
+	contact1, ok := contacts[1].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected map for contact, got %T", contacts[1])
+	}
+	if contact1["phone"] != "+62xxx456" {
+		t.Fatalf("expected nested contact phone masked to '+62xxx456', got %v", contact1["phone"])
+	}
+
+	// Row 2: deeply nested value
+	nested, ok := profile2["nested"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected map for nested, got %T", profile2["nested"])
+	}
+	if nested["deep"] != "+62xxx789" {
+		t.Fatalf("expected deeply nested phone masked to '+62xxx789', got %v", nested["deep"])
+	}
+
+	// Row 3: no PII — values unchanged
+	profile3, ok := output.Rows[2]["profile"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected map for profile, got %T", output.Rows[2]["profile"])
+	}
+	if profile3["simple"] != "no pii here" {
+		t.Fatalf("expected 'no pii here' unchanged, got %v", profile3["simple"])
+	}
+	if output.Rows[2]["phone"] != "not-a-phone" {
+		t.Fatalf("expected 'not-a-phone' unchanged, got %v", output.Rows[2]["phone"])
+	}
+}
+
 // --- Full Pipeline Test ---
 
 // pipelineBeforeHook rewrites any query to SELECT id, name, phone FROM pipeline_test ORDER BY id.
@@ -2099,4 +2478,342 @@ func TestClose_SubsequentOperationsFail(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error from DescribeTable after close, got nil")
 	}
+}
+
+// --- Logging Tests ---
+
+// parseLogLines splits a buffer into JSON log entries, returning only non-empty lines.
+func parseLogLines(buf *bytes.Buffer) []map[string]interface{} {
+	var entries []map[string]interface{}
+	for _, line := range strings.Split(buf.String(), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var entry map[string]interface{}
+		if err := json.Unmarshal([]byte(line), &entry); err == nil {
+			entries = append(entries, entry)
+		}
+	}
+	return entries
+}
+
+func TestQuery_LogsExecutionDetails(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	connStr := acquireTestDB(t)
+
+	var buf bytes.Buffer
+	logger := zerolog.New(&buf)
+
+	config := defaultConfig()
+	config.Protection.AllowDDL = true
+	p, err := pgmcp.New(ctx, connStr, config, logger)
+	if err != nil {
+		t.Fatalf("failed to create instance: %v", err)
+	}
+	t.Cleanup(func() { p.Close(ctx) })
+
+	// Setup table and insert data.
+	setupOutput := p.Query(ctx, pgmcp.QueryInput{SQL: "CREATE TABLE log_test (id serial PRIMARY KEY, name text)"})
+	if setupOutput.Error != "" {
+		t.Fatalf("setup failed: %s", setupOutput.Error)
+	}
+	setupOutput = p.Query(ctx, pgmcp.QueryInput{SQL: "INSERT INTO log_test (name) VALUES ('Alice'), ('Bob')"})
+	if setupOutput.Error != "" {
+		t.Fatalf("insert failed: %s", setupOutput.Error)
+	}
+
+	// Clear buffer to capture only the test query log.
+	buf.Reset()
+
+	// Execute a SELECT query.
+	output := p.Query(ctx, pgmcp.QueryInput{SQL: "SELECT id, name FROM log_test ORDER BY id"})
+	if output.Error != "" {
+		t.Fatalf("unexpected error: %s", output.Error)
+	}
+
+	entries := parseLogLines(&buf)
+	if len(entries) == 0 {
+		t.Fatal("expected at least one log entry, got none")
+	}
+
+	// Find the "query executed" log entry.
+	var queryLog map[string]interface{}
+	for _, entry := range entries {
+		if msg, ok := entry["message"].(string); ok && msg == "query executed" {
+			queryLog = entry
+			break
+		}
+	}
+	if queryLog == nil {
+		t.Fatalf("expected 'query executed' log entry, got entries: %v", entries)
+	}
+
+	// Verify required fields.
+	sql, ok := queryLog["sql"].(string)
+	if !ok || sql == "" {
+		t.Fatalf("expected non-empty 'sql' field in log, got %v", queryLog["sql"])
+	}
+	if !strings.Contains(sql, "SELECT id, name FROM log_test") {
+		t.Fatalf("expected sql to contain query text, got %q", sql)
+	}
+
+	if _, ok := queryLog["duration"]; !ok {
+		t.Fatalf("expected 'duration' field in log, got keys: %v", keys(queryLog))
+	}
+
+	rowCount, ok := queryLog["row_count"].(float64)
+	if !ok {
+		t.Fatalf("expected 'row_count' as number, got %T: %v", queryLog["row_count"], queryLog["row_count"])
+	}
+	if int(rowCount) != 2 {
+		t.Fatalf("expected row_count=2, got %v", rowCount)
+	}
+
+	if _, ok := queryLog["rows_affected"]; !ok {
+		t.Fatalf("expected 'rows_affected' field in log, got keys: %v", keys(queryLog))
+	}
+
+	// Verify log level is "info".
+	if level, ok := queryLog["level"].(string); ok && level != "info" {
+		t.Fatalf("expected log level 'info', got %q", level)
+	}
+}
+
+func TestQuery_LogsOptionalPipelineFields(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	connStr := acquireTestDB(t)
+
+	var buf bytes.Buffer
+	logger := zerolog.New(&buf)
+
+	// Configure hooks, sanitization, and timeout rules.
+	config := defaultConfig()
+	config.Protection.AllowDDL = true
+	config.DefaultHookTimeoutSeconds = 5
+	config.BeforeQueryHooks = []pgmcp.BeforeQueryHookEntry{
+		{Name: "passthrough", Hook: &logPassthroughBeforeHook{}},
+	}
+	config.AfterQueryHooks = []pgmcp.AfterQueryHookEntry{
+		{Name: "accept_all", Hook: &logPassthroughAfterHook{}},
+	}
+	config.Sanitization = []pgmcp.SanitizationRule{
+		{Pattern: `\d{3}-\d{3}-\d{4}`, Replacement: "***-***-****"},
+	}
+	config.Query.TimeoutRules = []pgmcp.TimeoutRule{
+		{Pattern: "log_pipeline_test", TimeoutSeconds: 25},
+	}
+
+	p, err := pgmcp.New(ctx, connStr, config, logger)
+	if err != nil {
+		t.Fatalf("failed to create instance: %v", err)
+	}
+	t.Cleanup(func() { p.Close(ctx) })
+
+	setupOutput := p.Query(ctx, pgmcp.QueryInput{SQL: "CREATE TABLE log_pipeline_test (id serial, phone text)"})
+	if setupOutput.Error != "" {
+		t.Fatalf("setup failed: %s", setupOutput.Error)
+	}
+	setupOutput = p.Query(ctx, pgmcp.QueryInput{SQL: "INSERT INTO log_pipeline_test (phone) VALUES ('555-123-4567')"})
+	if setupOutput.Error != "" {
+		t.Fatalf("insert failed: %s", setupOutput.Error)
+	}
+
+	buf.Reset()
+
+	output := p.Query(ctx, pgmcp.QueryInput{SQL: "SELECT * FROM log_pipeline_test"})
+	if output.Error != "" {
+		t.Fatalf("unexpected error: %s", output.Error)
+	}
+
+	entries := parseLogLines(&buf)
+	var queryLog map[string]interface{}
+	for _, entry := range entries {
+		if msg, ok := entry["message"].(string); ok && msg == "query executed" {
+			queryLog = entry
+			break
+		}
+	}
+	if queryLog == nil {
+		t.Fatalf("expected 'query executed' log entry, got entries: %v", entries)
+	}
+
+	// Verify optional before_hooks field.
+	beforeHooks, ok := queryLog["before_hooks"].([]interface{})
+	if !ok {
+		t.Fatalf("expected 'before_hooks' as array, got %T: %v", queryLog["before_hooks"], queryLog["before_hooks"])
+	}
+	if len(beforeHooks) != 1 || beforeHooks[0] != "passthrough" {
+		t.Fatalf("expected before_hooks=[passthrough], got %v", beforeHooks)
+	}
+
+	// Verify optional after_hooks field.
+	afterHooks, ok := queryLog["after_hooks"].([]interface{})
+	if !ok {
+		t.Fatalf("expected 'after_hooks' as array, got %T: %v", queryLog["after_hooks"], queryLog["after_hooks"])
+	}
+	if len(afterHooks) != 1 || afterHooks[0] != "accept_all" {
+		t.Fatalf("expected after_hooks=[accept_all], got %v", afterHooks)
+	}
+
+	// Verify optional timeout_rule field.
+	timeoutRule, ok := queryLog["timeout_rule"].(string)
+	if !ok || timeoutRule == "" {
+		t.Fatalf("expected non-empty 'timeout_rule' field, got %v", queryLog["timeout_rule"])
+	}
+	if timeoutRule != "log_pipeline_test" {
+		t.Fatalf("expected timeout_rule='log_pipeline_test', got %q", timeoutRule)
+	}
+
+	// Verify optional sanitized field.
+	sanitizedVal, ok := queryLog["sanitized"].(bool)
+	if !ok || !sanitizedVal {
+		t.Fatalf("expected sanitized=true, got %v", queryLog["sanitized"])
+	}
+}
+
+func TestListTables_LogsExecution(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	connStr := acquireTestDB(t)
+
+	var buf bytes.Buffer
+	logger := zerolog.New(&buf)
+
+	config := defaultConfig()
+	config.Protection.AllowDDL = true
+	p, err := pgmcp.New(ctx, connStr, config, logger)
+	if err != nil {
+		t.Fatalf("failed to create instance: %v", err)
+	}
+	t.Cleanup(func() { p.Close(ctx) })
+
+	setupOutput := p.Query(ctx, pgmcp.QueryInput{SQL: "CREATE TABLE lt_log_test (id serial PRIMARY KEY)"})
+	if setupOutput.Error != "" {
+		t.Fatalf("setup failed: %s", setupOutput.Error)
+	}
+
+	buf.Reset()
+
+	_, err = p.ListTables(ctx, pgmcp.ListTablesInput{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	entries := parseLogLines(&buf)
+	var ltLog map[string]interface{}
+	for _, entry := range entries {
+		if msg, ok := entry["message"].(string); ok && msg == "ListTables executed" {
+			ltLog = entry
+			break
+		}
+	}
+	if ltLog == nil {
+		t.Fatalf("expected 'ListTables executed' log entry, got entries: %v", entries)
+	}
+
+	if _, ok := ltLog["duration"]; !ok {
+		t.Fatalf("expected 'duration' field, got keys: %v", keys(ltLog))
+	}
+
+	tableCount, ok := ltLog["table_count"].(float64)
+	if !ok {
+		t.Fatalf("expected 'table_count' as number, got %T: %v", ltLog["table_count"], ltLog["table_count"])
+	}
+	if int(tableCount) < 1 {
+		t.Fatalf("expected table_count >= 1, got %v", tableCount)
+	}
+}
+
+func TestDescribeTable_LogsExecution(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	connStr := acquireTestDB(t)
+
+	var buf bytes.Buffer
+	logger := zerolog.New(&buf)
+
+	config := defaultConfig()
+	config.Protection.AllowDDL = true
+	p, err := pgmcp.New(ctx, connStr, config, logger)
+	if err != nil {
+		t.Fatalf("failed to create instance: %v", err)
+	}
+	t.Cleanup(func() { p.Close(ctx) })
+
+	setupOutput := p.Query(ctx, pgmcp.QueryInput{SQL: "CREATE TABLE dt_log_test (id serial PRIMARY KEY, name text)"})
+	if setupOutput.Error != "" {
+		t.Fatalf("setup failed: %s", setupOutput.Error)
+	}
+
+	buf.Reset()
+
+	_, err = p.DescribeTable(ctx, pgmcp.DescribeTableInput{Table: "dt_log_test"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	entries := parseLogLines(&buf)
+	var dtLog map[string]interface{}
+	for _, entry := range entries {
+		if msg, ok := entry["message"].(string); ok && msg == "DescribeTable executed" {
+			dtLog = entry
+			break
+		}
+	}
+	if dtLog == nil {
+		t.Fatalf("expected 'DescribeTable executed' log entry, got entries: %v", entries)
+	}
+
+	if _, ok := dtLog["duration"]; !ok {
+		t.Fatalf("expected 'duration' field, got keys: %v", keys(dtLog))
+	}
+
+	schema, ok := dtLog["schema"].(string)
+	if !ok || schema != "public" {
+		t.Fatalf("expected schema='public', got %v", dtLog["schema"])
+	}
+
+	table, ok := dtLog["table"].(string)
+	if !ok || table != "dt_log_test" {
+		t.Fatalf("expected table='dt_log_test', got %v", dtLog["table"])
+	}
+
+	tableType, ok := dtLog["type"].(string)
+	if !ok || tableType != "table" {
+		t.Fatalf("expected type='table', got %v", dtLog["type"])
+	}
+
+	columnCount, ok := dtLog["column_count"].(float64)
+	if !ok {
+		t.Fatalf("expected 'column_count' as number, got %T: %v", dtLog["column_count"], dtLog["column_count"])
+	}
+	if int(columnCount) != 2 {
+		t.Fatalf("expected column_count=2, got %v", columnCount)
+	}
+}
+
+// keys returns the keys of a map for error messages.
+func keys(m map[string]interface{}) []string {
+	ks := make([]string, 0, len(m))
+	for k := range m {
+		ks = append(ks, k)
+	}
+	return ks
+}
+
+// logPassthroughBeforeHook passes queries through unchanged (for logging tests).
+type logPassthroughBeforeHook struct{}
+
+func (h *logPassthroughBeforeHook) Run(ctx context.Context, query string) (string, error) {
+	return query, nil
+}
+
+// logPassthroughAfterHook passes results through unchanged (for logging tests).
+type logPassthroughAfterHook struct{}
+
+func (h *logPassthroughAfterHook) Run(ctx context.Context, result *pgmcp.QueryOutput) (*pgmcp.QueryOutput, error) {
+	return result, nil
 }

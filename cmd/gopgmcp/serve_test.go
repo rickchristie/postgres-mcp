@@ -146,6 +146,56 @@ func TestLoadConfigValidation_NoPort(t *testing.T) {
 	}
 }
 
+func TestRunServe_PanicsOnZeroPort(t *testing.T) {
+	dir := t.TempDir()
+	cfg := validServerConfig()
+	cfg.Server.Port = 0
+	path := writeConfigFile(t, dir, cfg)
+
+	t.Setenv("GOPGMCP_CONFIG_PATH", path)
+
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected panic for server.port = 0, but no panic occurred")
+		}
+		msg, ok := r.(string)
+		if !ok {
+			t.Fatalf("expected string panic, got %T: %v", r, r)
+		}
+		if !strings.Contains(msg, "server.port must be > 0") {
+			t.Fatalf("expected panic about server.port, got %q", msg)
+		}
+	}()
+
+	_ = runServe()
+}
+
+func TestRunServe_PanicsOnNegativePort(t *testing.T) {
+	dir := t.TempDir()
+	cfg := validServerConfig()
+	cfg.Server.Port = -1
+	path := writeConfigFile(t, dir, cfg)
+
+	t.Setenv("GOPGMCP_CONFIG_PATH", path)
+
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected panic for server.port = -1, but no panic occurred")
+		}
+		msg, ok := r.(string)
+		if !ok {
+			t.Fatalf("expected string panic, got %T: %v", r, r)
+		}
+		if !strings.Contains(msg, "server.port must be > 0") {
+			t.Fatalf("expected panic about server.port, got %q", msg)
+		}
+	}()
+
+	_ = runServe()
+}
+
 func TestLoadConfigValidation_HealthCheckPathEmpty(t *testing.T) {
 	dir := t.TempDir()
 	cfg := validServerConfig()

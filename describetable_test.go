@@ -2,6 +2,7 @@ package pgmcp_test
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -696,6 +697,48 @@ func TestDescribeTable_ExclusionConstraint(t *testing.T) {
 	}
 }
 
+func TestDescribeTable_DefinitionEmptyForNonViews(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.Protection.AllowDDL = true
+	config.Protection.AllowCreateExtension = true
+	p, _ := newTestInstance(t, config)
+
+	// Regular table
+	setupTable(t, p, "CREATE TABLE def_empty_table (id serial PRIMARY KEY, name text)")
+	output, err := p.DescribeTable(context.Background(), pgmcp.DescribeTableInput{Table: "def_empty_table"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if output.Definition != "" {
+		t.Fatalf("expected empty definition for regular table, got %q", output.Definition)
+	}
+
+	// Partitioned table
+	setupTable(t, p, "CREATE TABLE def_empty_part (id serial, created_at timestamp NOT NULL) PARTITION BY RANGE (created_at)")
+	output, err = p.DescribeTable(context.Background(), pgmcp.DescribeTableInput{Table: "def_empty_part"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if output.Definition != "" {
+		t.Fatalf("expected empty definition for partitioned table, got %q", output.Definition)
+	}
+
+	// Foreign table (if extension available)
+	extOutput := p.Query(context.Background(), pgmcp.QueryInput{SQL: "CREATE EXTENSION IF NOT EXISTS file_fdw"})
+	if extOutput.Error == "" {
+		setupTable(t, p, "CREATE SERVER def_empty_ft_server FOREIGN DATA WRAPPER file_fdw")
+		setupTable(t, p, "CREATE FOREIGN TABLE def_empty_ft (id integer, name text) SERVER def_empty_ft_server OPTIONS (filename '/dev/null', format 'csv')")
+		output, err = p.DescribeTable(context.Background(), pgmcp.DescribeTableInput{Table: "def_empty_ft"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if output.Definition != "" {
+			t.Fatalf("expected empty definition for foreign table, got %q", output.Definition)
+		}
+	}
+}
+
 func TestDescribeTable_ErrorField(t *testing.T) {
 	t.Parallel()
 	config := defaultConfig()
@@ -742,5 +785,106 @@ func TestDescribeTable_ForeignKeyConstraintInConstraintsList(t *testing.T) {
 	}
 	if !foundFK {
 		t.Error("expected FOREIGN KEY constraint in constraints list")
+	}
+}
+
+// rejectAllBeforeHookDT is a BeforeQueryHook that rejects every query.
+type rejectAllBeforeHookDT struct{}
+
+func (h *rejectAllBeforeHookDT) Run(ctx context.Context, query string) (string, error) {
+	return "", fmt.Errorf("hook rejected: %s", query)
+}
+
+func TestDescribeTable_BypassesHookProtectionSanitizationPipeline(t *testing.T) {
+	t.Parallel()
+
+	// Configure hooks that reject all queries, strict protection (all blocked),
+	// and sanitization rules — DescribeTable must bypass all of them.
+	config := defaultConfig()
+	config.DefaultHookTimeoutSeconds = 5
+	config.BeforeQueryHooks = []pgmcp.BeforeQueryHookEntry{
+		{
+			Name: "reject_all",
+			Hook: &rejectAllBeforeHookDT{},
+		},
+	}
+	config.Sanitization = []pgmcp.SanitizationRule{
+		{
+			Pattern:     `.*`,
+			Replacement: "REDACTED",
+			Description: "redact everything",
+		},
+	}
+
+	// We need a setup instance first (without hooks) to create a table with data.
+	setupConfig := defaultConfig()
+	setupConfig.Protection.AllowDDL = true
+	setupP, connStr := newTestInstance(t, setupConfig)
+	setupTable(t, setupP, `CREATE TABLE dt_bypass_test (
+		id serial PRIMARY KEY,
+		name text NOT NULL DEFAULT 'unnamed',
+		email text UNIQUE
+	)`)
+	setupTable(t, setupP, "CREATE INDEX idx_dt_bypass_name ON dt_bypass_test (name)")
+	setupP.Close(context.Background())
+
+	// Now create instance with hooks/sanitization — DescribeTable must still work.
+	ctx := context.Background()
+	p, err := pgmcp.New(ctx, connStr, config, testLogger())
+	if err != nil {
+		t.Fatalf("failed to create instance: %v", err)
+	}
+	t.Cleanup(func() { p.Close(ctx) })
+
+	output, err := p.DescribeTable(ctx, pgmcp.DescribeTableInput{Table: "dt_bypass_test"})
+	if err != nil {
+		t.Fatalf("DescribeTable should bypass hooks/protection/sanitization pipeline, but got error: %v", err)
+	}
+
+	// Verify basic metadata is correct and NOT sanitized.
+	if output.Schema != "public" {
+		t.Fatalf("expected schema 'public', got %q", output.Schema)
+	}
+	if output.Name != "dt_bypass_test" {
+		t.Fatalf("expected name 'dt_bypass_test', got %q", output.Name)
+	}
+	if output.Type != "table" {
+		t.Fatalf("expected type 'table', got %q", output.Type)
+	}
+
+	// Verify columns are returned correctly.
+	if len(output.Columns) != 3 {
+		t.Fatalf("expected 3 columns, got %d", len(output.Columns))
+	}
+	colNames := make(map[string]bool)
+	for _, col := range output.Columns {
+		colNames[col.Name] = true
+		if col.Name == "REDACTED" {
+			t.Fatal("column name should NOT be sanitized — DescribeTable bypasses sanitization")
+		}
+	}
+	if !colNames["id"] || !colNames["name"] || !colNames["email"] {
+		t.Fatalf("expected columns id, name, email — got %v", output.Columns)
+	}
+
+	// Verify indexes include the one we created.
+	foundIdx := false
+	for _, idx := range output.Indexes {
+		if idx.Name == "idx_dt_bypass_name" {
+			foundIdx = true
+			break
+		}
+	}
+	if !foundIdx {
+		t.Fatalf("expected to find index idx_dt_bypass_name, got %v", output.Indexes)
+	}
+
+	// Verify that Query IS blocked by the hook (proving the hook is active).
+	queryOutput := p.Query(ctx, pgmcp.QueryInput{SQL: "SELECT 1"})
+	if queryOutput.Error == "" {
+		t.Fatal("expected Query to be rejected by hook, but it succeeded")
+	}
+	if !strings.Contains(queryOutput.Error, "hook rejected") {
+		t.Fatalf("expected 'hook rejected' in error, got %q", queryOutput.Error)
 	}
 }

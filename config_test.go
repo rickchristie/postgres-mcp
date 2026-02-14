@@ -593,6 +593,45 @@ func TestLoadConfig_ValidPoolDurations(t *testing.T) {
 	defer p.Close(context.Background())
 }
 
+func TestLoadConfig_MinConnsApplied(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.Pool.MinConns = 2
+	p, _ := newTestInstance(t, config)
+
+	// With MinConns=2, the pool should maintain at least 2 idle connections.
+	// Run a query to ensure the pool is initialized, then verify functionality.
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "SELECT 1 AS val"})
+	if output.Error != "" {
+		t.Fatalf("unexpected error: %s", output.Error)
+	}
+	if output.Rows[0]["val"] != int32(1) {
+		t.Fatalf("expected 1, got %v", output.Rows[0]["val"])
+	}
+
+	// Run a second query to verify pool with MinConns works across multiple operations
+	output = p.Query(context.Background(), pgmcp.QueryInput{SQL: "SELECT 2 AS val"})
+	if output.Error != "" {
+		t.Fatalf("unexpected error: %s", output.Error)
+	}
+	if output.Rows[0]["val"] != int32(2) {
+		t.Fatalf("expected 2, got %v", output.Rows[0]["val"])
+	}
+}
+
+func TestLoadConfig_MinConnsZeroDefault(t *testing.T) {
+	t.Parallel()
+	// MinConns=0 (default) should work fine
+	config := defaultConfig()
+	config.Pool.MinConns = 0
+	p, _ := newTestInstance(t, config)
+
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "SELECT 1 AS val"})
+	if output.Error != "" {
+		t.Fatalf("unexpected error: %s", output.Error)
+	}
+}
+
 // --- Minimal hook implementations for config tests ---
 
 type passthroughBeforeHookConfig struct{}
