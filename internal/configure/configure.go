@@ -42,7 +42,7 @@ func run(configPath string, input io.Reader, output io.Writer) error {
 	fmt.Fprintf(output, "=== Connection ===\n")
 	cfg.Connection.Host = p.promptString("connection.host", cfg.Connection.Host)
 	cfg.Connection.Port = p.promptPositiveInt("connection.port", cfg.Connection.Port, "must be > 0")
-	cfg.Connection.DBName = p.promptStringWithHint("connection.dbname", cfg.Connection.DBName, "required")
+	cfg.Connection.DBName = p.promptRequiredStringWithHint("connection.dbname", cfg.Connection.DBName, "required")
 	cfg.Connection.SSLMode = p.promptEnum("connection.sslmode", cfg.Connection.SSLMode, sslModes)
 
 	// Server
@@ -227,6 +227,21 @@ func (p *prompter) promptStringWithHint(field string, current string, hint strin
 	return input
 }
 
+func (p *prompter) promptRequiredStringWithHint(field string, current string, hint string) string {
+	for {
+		fmt.Fprintf(p.output, "%s [%s] (%s: %q): ", field, hint, p.valueLabel(), current)
+		input := p.readLine()
+		if input == "" {
+			if current == "" {
+				fmt.Fprintf(p.output, "  Value is required, try again.\n")
+				continue
+			}
+			return current
+		}
+		return input
+	}
+}
+
 func (p *prompter) promptInt(field string, current int) int {
 	for {
 		fmt.Fprintf(p.output, "%s (%s: %d): ", field, p.valueLabel(), current)
@@ -248,6 +263,10 @@ func (p *prompter) promptPositiveInt(field string, current int, hint string) int
 		fmt.Fprintf(p.output, "%s [%s] (%s: %d): ", field, hint, p.valueLabel(), current)
 		input := p.readLine()
 		if input == "" {
+			if current <= 0 {
+				fmt.Fprintf(p.output, "  Value must be > 0, try again.\n")
+				continue
+			}
 			return current
 		}
 		val, err := strconv.Atoi(input)
@@ -365,7 +384,8 @@ func (p *prompter) promptTimeoutRules(current []pgmcp.TimeoutRule) []pgmcp.Timeo
 			})
 		case "r":
 			rules = removeByIndex(p, "timeout rule", rules)
-		case "c", "":
+		case "c":
+			fmt.Fprintln(p.output)
 			return rules
 		default:
 			fmt.Fprintf(p.output, "  Unknown choice, try again.\n")
@@ -399,7 +419,8 @@ func (p *prompter) promptErrorPrompts(current []pgmcp.ErrorPromptRule) []pgmcp.E
 			})
 		case "r":
 			rules = removeByIndex(p, "error prompt", rules)
-		case "c", "":
+		case "c":
+			fmt.Fprintln(p.output)
 			return rules
 		default:
 			fmt.Fprintf(p.output, "  Unknown choice, try again.\n")
@@ -435,7 +456,8 @@ func (p *prompter) promptSanitizationRules(current []pgmcp.SanitizationRule) []p
 			})
 		case "r":
 			rules = removeByIndex(p, "sanitization rule", rules)
-		case "c", "":
+		case "c":
+			fmt.Fprintln(p.output)
 			return rules
 		default:
 			fmt.Fprintf(p.output, "  Unknown choice, try again.\n")
@@ -479,7 +501,8 @@ func (p *prompter) promptHookEntries(label string, current []pgmcp.HookEntry) []
 			})
 		case "r":
 			entries = removeByIndex(p, label, entries)
-		case "c", "":
+		case "c":
+			fmt.Fprintln(p.output)
 			return entries
 		default:
 			fmt.Fprintf(p.output, "  Unknown choice, try again.\n")

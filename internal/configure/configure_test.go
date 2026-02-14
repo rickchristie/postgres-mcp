@@ -12,21 +12,52 @@ import (
 	pgmcp "github.com/rickchristie/postgres-mcp"
 )
 
+// validExistingConfig returns a ServerConfig with all promptPositiveInt fields
+// set to valid values, so pressing Enter preserves them without validation errors.
+func validExistingConfig() *pgmcp.ServerConfig {
+	cfg := &pgmcp.ServerConfig{}
+	cfg.Connection.Host = "localhost"
+	cfg.Connection.Port = 5432
+	cfg.Connection.DBName = "testdb"
+	cfg.Connection.SSLMode = "prefer"
+	cfg.Server.Port = 8080
+	cfg.Logging.Level = "info"
+	cfg.Logging.Format = "json"
+	cfg.Logging.Output = "stderr"
+	cfg.Pool.MaxConns = 5
+	cfg.Query.DefaultTimeoutSeconds = 30
+	cfg.Query.ListTablesTimeoutSeconds = 10
+	cfg.Query.DescribeTableTimeoutSeconds = 10
+	cfg.Query.MaxSQLLength = 100000
+	cfg.Query.MaxResultLength = 100000
+	return cfg
+}
+
 // allEnterInputs returns enough empty lines to accept defaults for every prompt
 // in the wizard. Each empty line means "accept current/default value".
 // Count: 4 connection + 3 server + 3 logging + 5 pool + 5 query + 3 general + 23 protection + 5 array editors (c for each) = 51
+//
+// Prompt index map:
+//
+//	0-3:   connection (host, port, dbname, sslmode)
+//	4-6:   server (port, health_check_enabled, health_check_path)
+//	7-9:   logging (level, format, output)
+//	10-14: pool (max_conns, min_conns, max_conn_lifetime, max_conn_idle_time, health_check_period)
+//	15-19: query (default_timeout, list_tables_timeout, describe_table_timeout, max_sql_length, max_result_length)
+//	20-22: general (read_only, timezone, default_hook_timeout)
+//	23-45: protection (23 bool fields)
+//	46-50: array editors (timeout_rules, error_prompts, sanitization, before_query hooks, after_query hooks)
 func allEnterInputs(overrides map[int]string) string {
 	lines := make([]string, 51)
 	for i := range lines {
 		lines[i] = ""
 	}
-	// Array editors need "c" to continue
-	// Timeout Rules (index 40), Error Prompts (41), Sanitization Rules (42), Before Query Hooks (43), After Query Hooks (44)
-	lines[40] = "c"
-	lines[41] = "c"
-	lines[42] = "c"
-	lines[43] = "c"
-	lines[44] = "c"
+	// Array editors need "c" to continue (indices 46-50)
+	lines[46] = "c"
+	lines[47] = "c"
+	lines[48] = "c"
+	lines[49] = "c"
+	lines[50] = "c"
 	for k, v := range overrides {
 		lines[k] = v
 	}
@@ -39,7 +70,8 @@ func TestRun_NewConfig_ShowsDefaultLabel(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 
-	input := allEnterInputs(nil)
+	// connection.dbname (index 2) is required and has no default for new configs.
+	input := allEnterInputs(map[int]string{2: "testdb"})
 	var output bytes.Buffer
 
 	err := run(configPath, strings.NewReader(input), &output)
@@ -118,7 +150,7 @@ func TestRun_NewConfig_DefaultsWrittenToFile(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 
-	input := allEnterInputs(nil)
+	input := allEnterInputs(map[int]string{2: "testdb"})
 	var output bytes.Buffer
 
 	err := run(configPath, strings.NewReader(input), &output)
@@ -141,6 +173,9 @@ func TestRun_NewConfig_DefaultsWrittenToFile(t *testing.T) {
 	}
 	if cfg.Connection.Port != 5432 {
 		t.Errorf("expected port 5432, got %d", cfg.Connection.Port)
+	}
+	if cfg.Connection.DBName != "testdb" {
+		t.Errorf("expected dbname 'testdb', got %q", cfg.Connection.DBName)
 	}
 	if cfg.Connection.SSLMode != "prefer" {
 		t.Errorf("expected sslmode 'prefer', got %q", cfg.Connection.SSLMode)
@@ -192,10 +227,11 @@ func TestRun_ExistingConfig_ShowsCurrentLabel(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 
-	// Write an existing config file
-	existing := &pgmcp.ServerConfig{}
+	// Write an existing config file with all required fields set to valid values
+	existing := validExistingConfig()
 	existing.Connection.Host = "myhost"
 	existing.Connection.Port = 5433
+	existing.Connection.DBName = "mydb"
 	existing.Connection.SSLMode = "require"
 	existing.Logging.Level = "warn"
 	existing.Logging.Format = "text"
@@ -235,8 +271,8 @@ func TestRun_ExistingConfig_PreservesValues(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 
-	// Write an existing config
-	existing := &pgmcp.ServerConfig{}
+	// Write an existing config with all required fields set to valid values
+	existing := validExistingConfig()
 	existing.Connection.Host = "prodhost"
 	existing.Connection.Port = 5433
 	existing.Connection.DBName = "proddb"
@@ -553,7 +589,7 @@ func TestRun_NewConfig_EnumFieldsShowOptions(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 
-	input := allEnterInputs(nil)
+	input := allEnterInputs(map[int]string{2: "testdb"})
 	var output bytes.Buffer
 
 	err := run(configPath, strings.NewReader(input), &output)
@@ -585,8 +621,9 @@ func TestRun_NewConfig_OverrideEnumValues(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 
-	// Override sslmode (index 3), logging.level (index 7), logging.format (index 8)
+	// Override dbname (index 2), sslmode (index 3), logging.level (index 7), logging.format (index 8)
 	input := allEnterInputs(map[int]string{
+		2: "testdb",
 		3: "require",
 		7: "debug",
 		8: "text",
@@ -1259,6 +1296,87 @@ func TestPromptStringWithHint_CurrentLabelForExisting(t *testing.T) {
 	}
 	if strings.Contains(out, "(default:") {
 		t.Errorf("should not contain default label for existing config, got: %s", out)
+	}
+}
+
+// --- promptRequiredStringWithHint tests ---
+
+func TestPromptRequiredStringWithHint_AcceptsNonEmpty(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	p := &prompter{scanner: newScanner("mydb\n"), output: &output, isNew: true}
+
+	result := p.promptRequiredStringWithHint("connection.dbname", "", "required")
+
+	if result != "mydb" {
+		t.Errorf("expected 'mydb', got %q", result)
+	}
+}
+
+func TestPromptRequiredStringWithHint_RejectsEmptyWhenCurrentEmpty(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	p := &prompter{scanner: newScanner("\nmydb\n"), output: &output, isNew: true}
+
+	result := p.promptRequiredStringWithHint("connection.dbname", "", "required")
+
+	if result != "mydb" {
+		t.Errorf("expected 'mydb', got %q", result)
+	}
+	out := output.String()
+	if !strings.Contains(out, "Value is required") {
+		t.Errorf("expected required error message, got: %s", out)
+	}
+}
+
+func TestPromptRequiredStringWithHint_AcceptsEnterWhenCurrentNonEmpty(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	p := &prompter{scanner: newScanner("\n"), output: &output, isNew: false}
+
+	result := p.promptRequiredStringWithHint("connection.dbname", "existingdb", "required")
+
+	if result != "existingdb" {
+		t.Errorf("expected 'existingdb', got %q", result)
+	}
+}
+
+// --- promptPositiveInt: reject Enter on invalid current ---
+
+func TestPromptPositiveInt_RejectsEnterWhenCurrentZero(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	p := &prompter{scanner: newScanner("\n5\n"), output: &output, isNew: false}
+
+	result := p.promptPositiveInt("pool.max_conns", 0, "must be > 0")
+
+	if result != 5 {
+		t.Errorf("expected 5, got %d", result)
+	}
+	out := output.String()
+	if !strings.Contains(out, "Value must be > 0") {
+		t.Errorf("expected > 0 error message, got: %s", out)
+	}
+}
+
+func TestPromptPositiveInt_RejectsEnterWhenCurrentNegative(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	p := &prompter{scanner: newScanner("\n10\n"), output: &output, isNew: false}
+
+	result := p.promptPositiveInt("server.port", -1, "must be > 0")
+
+	if result != 10 {
+		t.Errorf("expected 10, got %d", result)
+	}
+	out := output.String()
+	if !strings.Contains(out, "Value must be > 0") {
+		t.Errorf("expected > 0 error message, got: %s", out)
 	}
 }
 
