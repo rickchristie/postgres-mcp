@@ -49,9 +49,10 @@
         "isDefault": true
       },
       "presentation": {
-        "reveal": "always",
+        "reveal": "never",
         "panel": "shared",
-        "focus": true
+        "focus": false,
+        "close": true
       },
       "problemMatcher": ["$go"]
     }

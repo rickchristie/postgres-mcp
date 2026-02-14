@@ -7,8 +7,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	pgmcp "github.com/rickchristie/postgres-mcp"
 )
@@ -39,43 +41,43 @@ func run(configPath string, input io.Reader, output io.Writer) error {
 	// Connection
 	fmt.Fprintf(output, "=== Connection ===\n")
 	cfg.Connection.Host = p.promptString("connection.host", cfg.Connection.Host)
-	cfg.Connection.Port = p.promptInt("connection.port", cfg.Connection.Port)
-	cfg.Connection.DBName = p.promptString("connection.dbname", cfg.Connection.DBName)
+	cfg.Connection.Port = p.promptPositiveInt("connection.port", cfg.Connection.Port, "must be > 0")
+	cfg.Connection.DBName = p.promptStringWithHint("connection.dbname", cfg.Connection.DBName, "required")
 	cfg.Connection.SSLMode = p.promptEnum("connection.sslmode", cfg.Connection.SSLMode, sslModes)
 
 	// Server
 	fmt.Fprintf(output, "\n=== Server ===\n")
-	cfg.Server.Port = p.promptInt("server.port", cfg.Server.Port)
+	cfg.Server.Port = p.promptPositiveInt("server.port", cfg.Server.Port, "must be > 0")
 	cfg.Server.HealthCheckEnabled = p.promptBool("server.health_check_enabled", cfg.Server.HealthCheckEnabled)
-	cfg.Server.HealthCheckPath = p.promptString("server.health_check_path", cfg.Server.HealthCheckPath)
+	cfg.Server.HealthCheckPath = p.promptStringWithHint("server.health_check_path", cfg.Server.HealthCheckPath, "e.g. /healthz, required when health_check_enabled is true")
 
 	// Logging
 	fmt.Fprintf(output, "\n=== Logging ===\n")
 	cfg.Logging.Level = p.promptEnum("logging.level", cfg.Logging.Level, logLevels)
 	cfg.Logging.Format = p.promptEnum("logging.format", cfg.Logging.Format, logFormats)
-	cfg.Logging.Output = p.promptString("logging.output", cfg.Logging.Output)
+	cfg.Logging.Output = p.promptStringWithHint("logging.output", cfg.Logging.Output, "stdout, stderr, or file path")
 
 	// Pool
 	fmt.Fprintf(output, "\n=== Pool ===\n")
-	cfg.Pool.MaxConns = p.promptInt("pool.max_conns", cfg.Pool.MaxConns)
-	cfg.Pool.MinConns = p.promptInt("pool.min_conns", cfg.Pool.MinConns)
-	cfg.Pool.MaxConnLifetime = p.promptString("pool.max_conn_lifetime", cfg.Pool.MaxConnLifetime)
-	cfg.Pool.MaxConnIdleTime = p.promptString("pool.max_conn_idle_time", cfg.Pool.MaxConnIdleTime)
-	cfg.Pool.HealthCheckPeriod = p.promptString("pool.health_check_period", cfg.Pool.HealthCheckPeriod)
+	cfg.Pool.MaxConns = p.promptPositiveInt("pool.max_conns", cfg.Pool.MaxConns, "must be > 0")
+	cfg.Pool.MinConns = p.promptNonNegativeInt("pool.min_conns", cfg.Pool.MinConns, "must be >= 0")
+	cfg.Pool.MaxConnLifetime = p.promptDuration("pool.max_conn_lifetime", cfg.Pool.MaxConnLifetime, "Go duration: e.g. 1h, 30m, 1h30m")
+	cfg.Pool.MaxConnIdleTime = p.promptDuration("pool.max_conn_idle_time", cfg.Pool.MaxConnIdleTime, "Go duration: e.g. 1h, 30m, 1h30m")
+	cfg.Pool.HealthCheckPeriod = p.promptDuration("pool.health_check_period", cfg.Pool.HealthCheckPeriod, "Go duration: e.g. 1m, 30s, 1m30s")
 
 	// Query
 	fmt.Fprintf(output, "\n=== Query ===\n")
-	cfg.Query.DefaultTimeoutSeconds = p.promptInt("query.default_timeout_seconds", cfg.Query.DefaultTimeoutSeconds)
-	cfg.Query.ListTablesTimeoutSeconds = p.promptInt("query.list_tables_timeout_seconds", cfg.Query.ListTablesTimeoutSeconds)
-	cfg.Query.DescribeTableTimeoutSeconds = p.promptInt("query.describe_table_timeout_seconds", cfg.Query.DescribeTableTimeoutSeconds)
-	cfg.Query.MaxSQLLength = p.promptInt("query.max_sql_length", cfg.Query.MaxSQLLength)
-	cfg.Query.MaxResultLength = p.promptInt("query.max_result_length", cfg.Query.MaxResultLength)
+	cfg.Query.DefaultTimeoutSeconds = p.promptPositiveInt("query.default_timeout_seconds", cfg.Query.DefaultTimeoutSeconds, "seconds, must be > 0")
+	cfg.Query.ListTablesTimeoutSeconds = p.promptPositiveInt("query.list_tables_timeout_seconds", cfg.Query.ListTablesTimeoutSeconds, "seconds, must be > 0")
+	cfg.Query.DescribeTableTimeoutSeconds = p.promptPositiveInt("query.describe_table_timeout_seconds", cfg.Query.DescribeTableTimeoutSeconds, "seconds, must be > 0")
+	cfg.Query.MaxSQLLength = p.promptPositiveInt("query.max_sql_length", cfg.Query.MaxSQLLength, "bytes, must be > 0")
+	cfg.Query.MaxResultLength = p.promptPositiveInt("query.max_result_length", cfg.Query.MaxResultLength, "characters, must be > 0")
 
 	// Read-only and misc
 	fmt.Fprintf(output, "\n=== General ===\n")
 	cfg.ReadOnly = p.promptBool("read_only", cfg.ReadOnly)
-	cfg.Timezone = p.promptString("timezone", cfg.Timezone)
-	cfg.DefaultHookTimeoutSeconds = p.promptInt("default_hook_timeout_seconds", cfg.DefaultHookTimeoutSeconds)
+	cfg.Timezone = p.promptTimezone(cfg.Timezone)
+	cfg.DefaultHookTimeoutSeconds = p.promptNonNegativeInt("default_hook_timeout_seconds", cfg.DefaultHookTimeoutSeconds, "seconds, must be > 0 when hooks are configured")
 
 	// Protection
 	fmt.Fprintf(output, "\n=== Protection ===\n")
@@ -149,6 +151,9 @@ func applyDefaults(cfg *pgmcp.ServerConfig) {
 	cfg.Logging.Format = "json"
 	cfg.Logging.Output = "stderr"
 	cfg.Pool.MaxConns = 5
+	cfg.Pool.MaxConnLifetime = "1h"
+	cfg.Pool.MaxConnIdleTime = "30m"
+	cfg.Pool.HealthCheckPeriod = "1m"
 	cfg.Query.DefaultTimeoutSeconds = 30
 	cfg.Query.ListTablesTimeoutSeconds = 10
 	cfg.Query.DescribeTableTimeoutSeconds = 10
@@ -213,34 +218,116 @@ func (p *prompter) promptString(field string, current string) string {
 	return input
 }
 
-func (p *prompter) promptInt(field string, current int) int {
-	fmt.Fprintf(p.output, "%s (%s: %d): ", field, p.valueLabel(), current)
+func (p *prompter) promptStringWithHint(field string, current string, hint string) string {
+	fmt.Fprintf(p.output, "%s [%s] (%s: %q): ", field, hint, p.valueLabel(), current)
 	input := p.readLine()
 	if input == "" {
 		return current
 	}
-	val, err := strconv.Atoi(input)
-	if err != nil {
-		fmt.Fprintf(p.output, "  Invalid integer, keeping current value.\n")
-		return current
+	return input
+}
+
+func (p *prompter) promptInt(field string, current int) int {
+	for {
+		fmt.Fprintf(p.output, "%s (%s: %d): ", field, p.valueLabel(), current)
+		input := p.readLine()
+		if input == "" {
+			return current
+		}
+		val, err := strconv.Atoi(input)
+		if err != nil {
+			fmt.Fprintf(p.output, "  Invalid integer %q, try again.\n", input)
+			continue
+		}
+		return val
 	}
-	return val
+}
+
+func (p *prompter) promptPositiveInt(field string, current int, hint string) int {
+	for {
+		fmt.Fprintf(p.output, "%s [%s] (%s: %d): ", field, hint, p.valueLabel(), current)
+		input := p.readLine()
+		if input == "" {
+			return current
+		}
+		val, err := strconv.Atoi(input)
+		if err != nil {
+			fmt.Fprintf(p.output, "  Invalid integer %q, try again.\n", input)
+			continue
+		}
+		if val <= 0 {
+			fmt.Fprintf(p.output, "  Value must be > 0, try again.\n")
+			continue
+		}
+		return val
+	}
+}
+
+func (p *prompter) promptNonNegativeInt(field string, current int, hint string) int {
+	for {
+		fmt.Fprintf(p.output, "%s [%s] (%s: %d): ", field, hint, p.valueLabel(), current)
+		input := p.readLine()
+		if input == "" {
+			return current
+		}
+		val, err := strconv.Atoi(input)
+		if err != nil {
+			fmt.Fprintf(p.output, "  Invalid integer %q, try again.\n", input)
+			continue
+		}
+		if val < 0 {
+			fmt.Fprintf(p.output, "  Value must be >= 0, try again.\n")
+			continue
+		}
+		return val
+	}
 }
 
 func (p *prompter) promptBool(field string, current bool) bool {
-	fmt.Fprintf(p.output, "%s (%s: %v): ", field, p.valueLabel(), current)
-	input := p.readLine()
-	if input == "" {
-		return current
+	for {
+		fmt.Fprintf(p.output, "%s (%s: %v): ", field, p.valueLabel(), current)
+		input := p.readLine()
+		if input == "" {
+			return current
+		}
+		switch strings.ToLower(input) {
+		case "true", "t", "yes", "y", "1":
+			return true
+		case "false", "f", "no", "n", "0":
+			return false
+		default:
+			fmt.Fprintf(p.output, "  Invalid value %q, use true/false/yes/no, try again.\n", input)
+		}
 	}
-	switch strings.ToLower(input) {
-	case "true", "t", "yes", "y", "1":
-		return true
-	case "false", "f", "no", "n", "0":
-		return false
-	default:
-		fmt.Fprintf(p.output, "  Invalid boolean, keeping current value.\n")
-		return current
+}
+
+func (p *prompter) promptDuration(field string, current string, hint string) string {
+	for {
+		fmt.Fprintf(p.output, "%s [%s] (%s: %q): ", field, hint, p.valueLabel(), current)
+		input := p.readLine()
+		if input == "" {
+			return current
+		}
+		if _, err := time.ParseDuration(input); err != nil {
+			fmt.Fprintf(p.output, "  Invalid Go duration %q, try again.\n", input)
+			continue
+		}
+		return input
+	}
+}
+
+func (p *prompter) promptTimezone(current string) string {
+	for {
+		fmt.Fprintf(p.output, "timezone [e.g. UTC, America/New_York, empty = server default] (%s: %q): ", p.valueLabel(), current)
+		input := p.readLine()
+		if input == "" {
+			return current
+		}
+		if _, err := time.LoadLocation(input); err != nil {
+			fmt.Fprintf(p.output, "  Invalid timezone %q, please enter a valid IANA timezone.\n", input)
+			continue
+		}
+		return input
 	}
 }
 
@@ -270,8 +357,8 @@ func (p *prompter) promptTimeoutRules(current []pgmcp.TimeoutRule) []pgmcp.Timeo
 		choice := strings.ToLower(p.readLine())
 		switch choice {
 		case "a":
-			pattern := p.promptNewField("pattern")
-			timeout := p.promptNewIntField("timeout_seconds")
+			pattern := p.promptNewRegexField("pattern")
+			timeout := p.promptNewPositiveIntField("timeout_seconds")
 			rules = append(rules, pgmcp.TimeoutRule{
 				Pattern:        pattern,
 				TimeoutSeconds: timeout,
@@ -304,7 +391,7 @@ func (p *prompter) promptErrorPrompts(current []pgmcp.ErrorPromptRule) []pgmcp.E
 		choice := strings.ToLower(p.readLine())
 		switch choice {
 		case "a":
-			pattern := p.promptNewField("pattern")
+			pattern := p.promptNewRegexField("pattern")
 			message := p.promptNewField("message")
 			rules = append(rules, pgmcp.ErrorPromptRule{
 				Pattern: pattern,
@@ -338,7 +425,7 @@ func (p *prompter) promptSanitizationRules(current []pgmcp.SanitizationRule) []p
 		choice := strings.ToLower(p.readLine())
 		switch choice {
 		case "a":
-			pattern := p.promptNewField("pattern")
+			pattern := p.promptNewRegexField("pattern")
 			replacement := p.promptNewField("replacement")
 			description := p.promptNewField("description")
 			rules = append(rules, pgmcp.SanitizationRule{
@@ -374,7 +461,7 @@ func (p *prompter) promptHookEntries(label string, current []pgmcp.HookEntry) []
 		choice := strings.ToLower(p.readLine())
 		switch choice {
 		case "a":
-			pattern := p.promptNewField("pattern")
+			pattern := p.promptNewRegexField("pattern")
 			command := p.promptNewField("command")
 			argsStr := p.promptNewField("args (comma-separated)")
 			var args []string
@@ -383,7 +470,7 @@ func (p *prompter) promptHookEntries(label string, current []pgmcp.HookEntry) []
 					args = append(args, strings.TrimSpace(a))
 				}
 			}
-			timeout := p.promptNewIntField("timeout_seconds")
+			timeout := p.promptNewNonNegativeIntField("timeout_seconds")
 			entries = append(entries, pgmcp.HookEntry{
 				Pattern:        pattern,
 				Command:        command,
@@ -416,18 +503,60 @@ func (p *prompter) promptNewField(name string) string {
 	return p.readLine()
 }
 
-func (p *prompter) promptNewIntField(name string) int {
-	fmt.Fprintf(p.output, "  %s: ", name)
-	input := p.readLine()
-	if input == "" {
-		return 0
+func (p *prompter) promptNewRegexField(name string) string {
+	for {
+		fmt.Fprintf(p.output, "  %s (regex): ", name)
+		input := p.readLine()
+		if input == "" {
+			return ""
+		}
+		if _, err := regexp.Compile(input); err != nil {
+			fmt.Fprintf(p.output, "  Invalid regex %q: %v, try again.\n", input, err)
+			continue
+		}
+		return input
 	}
-	val, err := strconv.Atoi(input)
-	if err != nil {
-		fmt.Fprintf(p.output, "  Invalid integer, using 0.\n")
-		return 0
+}
+
+func (p *prompter) promptNewPositiveIntField(name string) int {
+	for {
+		fmt.Fprintf(p.output, "  %s (must be > 0): ", name)
+		input := p.readLine()
+		if input == "" {
+			fmt.Fprintf(p.output, "  Value is required and must be > 0, try again.\n")
+			continue
+		}
+		val, err := strconv.Atoi(input)
+		if err != nil {
+			fmt.Fprintf(p.output, "  Invalid integer %q, try again.\n", input)
+			continue
+		}
+		if val <= 0 {
+			fmt.Fprintf(p.output, "  Value must be > 0, try again.\n")
+			continue
+		}
+		return val
 	}
-	return val
+}
+
+func (p *prompter) promptNewNonNegativeIntField(name string) int {
+	for {
+		fmt.Fprintf(p.output, "  %s (must be >= 0): ", name)
+		input := p.readLine()
+		if input == "" {
+			return 0
+		}
+		val, err := strconv.Atoi(input)
+		if err != nil {
+			fmt.Fprintf(p.output, "  Invalid integer %q, try again.\n", input)
+			continue
+		}
+		if val < 0 {
+			fmt.Fprintf(p.output, "  Value must be >= 0, try again.\n")
+			continue
+		}
+		return val
+	}
 }
 
 // removeByIndex is a generic helper for removing an element by index from a slice.

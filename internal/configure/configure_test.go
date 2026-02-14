@@ -79,6 +79,31 @@ func TestRun_NewConfig_ShowsDefaultLabel(t *testing.T) {
 	if !strings.Contains(out, `(default: "stderr"`) {
 		t.Errorf("expected default log output 'stderr' in output")
 	}
+
+	// Verify hint text for fields with constraints
+	hints := []struct {
+		hint string
+		desc string
+	}{
+		{"[required]", "connection.dbname required hint"},
+		{"[must be > 0]", "server.port/connection.port/pool.max_conns must be > 0 hint"},
+		{"[must be >= 0]", "pool.min_conns must be >= 0 hint"},
+		{"[e.g. /healthz, required when health_check_enabled is true]", "health_check_path hint"},
+		{"[stdout, stderr, or file path]", "logging.output hint"},
+		{"[Go duration: e.g. 1h, 30m, 1h30m]", "pool duration hint"},
+		{"[Go duration: e.g. 1m, 30s, 1m30s]", "health_check_period hint"},
+		{"[seconds, must be > 0]", "timeout seconds hint"},
+		{"[bytes, must be > 0]", "max_sql_length hint"},
+		{"[characters, must be > 0]", "max_result_length hint"},
+		{"[e.g. UTC, America/New_York, empty = server default]", "timezone hint"},
+		{"[seconds, must be > 0 when hooks are configured]", "default_hook_timeout_seconds hint"},
+	}
+	for _, h := range hints {
+		if !strings.Contains(out, h.hint) {
+			t.Errorf("expected %s %q in output", h.desc, h.hint)
+		}
+	}
+
 	if !strings.Contains(out, "(default: 5)") {
 		t.Errorf("expected default max_conns 5 in output")
 	}
@@ -134,6 +159,15 @@ func TestRun_NewConfig_DefaultsWrittenToFile(t *testing.T) {
 	}
 	if cfg.Pool.MaxConns != 5 {
 		t.Errorf("expected max_conns 5, got %d", cfg.Pool.MaxConns)
+	}
+	if cfg.Pool.MaxConnLifetime != "1h" {
+		t.Errorf("expected max_conn_lifetime '1h', got %q", cfg.Pool.MaxConnLifetime)
+	}
+	if cfg.Pool.MaxConnIdleTime != "30m" {
+		t.Errorf("expected max_conn_idle_time '30m', got %q", cfg.Pool.MaxConnIdleTime)
+	}
+	if cfg.Pool.HealthCheckPeriod != "1m" {
+		t.Errorf("expected health_check_period '1m', got %q", cfg.Pool.HealthCheckPeriod)
 	}
 	if cfg.Query.DefaultTimeoutSeconds != 30 {
 		t.Errorf("expected default_timeout_seconds 30, got %d", cfg.Query.DefaultTimeoutSeconds)
@@ -441,6 +475,15 @@ func TestApplyDefaults(t *testing.T) {
 	if cfg.Pool.MaxConns != 5 {
 		t.Errorf("expected max_conns 5, got %d", cfg.Pool.MaxConns)
 	}
+	if cfg.Pool.MaxConnLifetime != "1h" {
+		t.Errorf("expected max_conn_lifetime '1h', got %q", cfg.Pool.MaxConnLifetime)
+	}
+	if cfg.Pool.MaxConnIdleTime != "30m" {
+		t.Errorf("expected max_conn_idle_time '30m', got %q", cfg.Pool.MaxConnIdleTime)
+	}
+	if cfg.Pool.HealthCheckPeriod != "1m" {
+		t.Errorf("expected health_check_period '1m', got %q", cfg.Pool.HealthCheckPeriod)
+	}
 	if cfg.Query.DefaultTimeoutSeconds != 30 {
 		t.Errorf("expected default_timeout_seconds 30, got %d", cfg.Query.DefaultTimeoutSeconds)
 	}
@@ -567,6 +610,655 @@ func TestRun_NewConfig_OverrideEnumValues(t *testing.T) {
 	}
 	if cfg.Logging.Format != "text" {
 		t.Errorf("expected format 'text', got %q", cfg.Logging.Format)
+	}
+}
+
+func TestPromptTimezone_AcceptsValid(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	p := &prompter{
+		scanner: newScanner("Asia/Jakarta\n"),
+		output:  &output,
+		isNew:   true,
+	}
+
+	result := p.promptTimezone("")
+
+	if result != "Asia/Jakarta" {
+		t.Errorf("expected 'Asia/Jakarta', got %q", result)
+	}
+
+	out := output.String()
+	if !strings.Contains(out, "[e.g. UTC, America/New_York, empty = server default]") {
+		t.Errorf("expected timezone hint in output, got: %s", out)
+	}
+}
+
+func TestPromptTimezone_AcceptsUTC(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	p := &prompter{
+		scanner: newScanner("UTC\n"),
+		output:  &output,
+		isNew:   true,
+	}
+
+	result := p.promptTimezone("")
+
+	if result != "UTC" {
+		t.Errorf("expected 'UTC', got %q", result)
+	}
+}
+
+func TestPromptTimezone_RejectsInvalidThenAcceptsValid(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	p := &prompter{
+		scanner: newScanner("NotATimezone\nAmerica/New_York\n"),
+		output:  &output,
+		isNew:   true,
+	}
+
+	result := p.promptTimezone("")
+
+	if result != "America/New_York" {
+		t.Errorf("expected 'America/New_York', got %q", result)
+	}
+
+	out := output.String()
+	if !strings.Contains(out, `Invalid timezone "NotATimezone"`) {
+		t.Errorf("expected invalid timezone error, got: %s", out)
+	}
+}
+
+func TestPromptTimezone_EmptyKeepsCurrent(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	p := &prompter{
+		scanner: newScanner("\n"),
+		output:  &output,
+		isNew:   false,
+	}
+
+	result := p.promptTimezone("Europe/London")
+
+	if result != "Europe/London" {
+		t.Errorf("expected 'Europe/London', got %q", result)
+	}
+
+	out := output.String()
+	if !strings.Contains(out, `(current: "Europe/London")`) {
+		t.Errorf("expected current label, got: %s", out)
+	}
+}
+
+func TestPromptTimezone_EmptyKeepsEmpty(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	p := &prompter{
+		scanner: newScanner("\n"),
+		output:  &output,
+		isNew:   true,
+	}
+
+	result := p.promptTimezone("")
+
+	if result != "" {
+		t.Errorf("expected empty string, got %q", result)
+	}
+}
+
+func TestPromptTimezone_MultipleInvalidThenValid(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	p := &prompter{
+		scanner: newScanner("bad1\nbad2\nAsia/Tokyo\n"),
+		output:  &output,
+		isNew:   true,
+	}
+
+	result := p.promptTimezone("")
+
+	if result != "Asia/Tokyo" {
+		t.Errorf("expected 'Asia/Tokyo', got %q", result)
+	}
+
+	out := output.String()
+	count := strings.Count(out, "Invalid timezone")
+	if count != 2 {
+		t.Errorf("expected 2 invalid timezone messages, got %d", count)
+	}
+}
+
+// --- promptPositiveInt tests ---
+
+func TestPromptPositiveInt_ShowsHintAndDefault(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	p := &prompter{scanner: newScanner("\n"), output: &output, isNew: true}
+
+	result := p.promptPositiveInt("query.max_sql_length", 100000, "bytes, must be > 0")
+
+	if result != 100000 {
+		t.Errorf("expected 100000, got %d", result)
+	}
+	out := output.String()
+	if !strings.Contains(out, "[bytes, must be > 0]") {
+		t.Errorf("expected hint in output, got: %s", out)
+	}
+	if !strings.Contains(out, "(default: 100000)") {
+		t.Errorf("expected default label, got: %s", out)
+	}
+}
+
+func TestPromptPositiveInt_AcceptsValidValue(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	p := &prompter{scanner: newScanner("50000\n"), output: &output, isNew: true}
+
+	result := p.promptPositiveInt("query.max_result_length", 100000, "characters, must be > 0")
+
+	if result != 50000 {
+		t.Errorf("expected 50000, got %d", result)
+	}
+}
+
+func TestPromptPositiveInt_RejectsZeroThenAccepts(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	p := &prompter{scanner: newScanner("0\n5\n"), output: &output, isNew: true}
+
+	result := p.promptPositiveInt("pool.max_conns", 5, "must be > 0")
+
+	if result != 5 {
+		t.Errorf("expected 5, got %d", result)
+	}
+	out := output.String()
+	if !strings.Contains(out, "Value must be > 0") {
+		t.Errorf("expected > 0 error message, got: %s", out)
+	}
+}
+
+func TestPromptPositiveInt_RejectsNegativeThenAccepts(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	p := &prompter{scanner: newScanner("-1\n10\n"), output: &output, isNew: true}
+
+	result := p.promptPositiveInt("server.port", 8080, "must be > 0")
+
+	if result != 10 {
+		t.Errorf("expected 10, got %d", result)
+	}
+	out := output.String()
+	if !strings.Contains(out, "Value must be > 0") {
+		t.Errorf("expected > 0 error message, got: %s", out)
+	}
+}
+
+func TestPromptPositiveInt_RejectsNonIntegerThenAccepts(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	p := &prompter{scanner: newScanner("abc\n42\n"), output: &output, isNew: true}
+
+	result := p.promptPositiveInt("server.port", 8080, "must be > 0")
+
+	if result != 42 {
+		t.Errorf("expected 42, got %d", result)
+	}
+	out := output.String()
+	if !strings.Contains(out, `Invalid integer "abc"`) {
+		t.Errorf("expected invalid integer error, got: %s", out)
+	}
+}
+
+func TestPromptPositiveInt_CurrentLabelForExisting(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	p := &prompter{scanner: newScanner("\n"), output: &output, isNew: false}
+
+	result := p.promptPositiveInt("query.max_sql_length", 200000, "bytes, must be > 0")
+
+	if result != 200000 {
+		t.Errorf("expected 200000, got %d", result)
+	}
+	out := output.String()
+	if !strings.Contains(out, "(current: 200000)") {
+		t.Errorf("expected current label, got: %s", out)
+	}
+	if strings.Contains(out, "(default:") {
+		t.Errorf("should not contain default label, got: %s", out)
+	}
+}
+
+// --- promptNonNegativeInt tests ---
+
+func TestPromptNonNegativeInt_AcceptsZero(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	p := &prompter{scanner: newScanner("0\n"), output: &output, isNew: true}
+
+	result := p.promptNonNegativeInt("pool.min_conns", 0, "must be >= 0")
+
+	if result != 0 {
+		t.Errorf("expected 0, got %d", result)
+	}
+}
+
+func TestPromptNonNegativeInt_AcceptsPositive(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	p := &prompter{scanner: newScanner("3\n"), output: &output, isNew: true}
+
+	result := p.promptNonNegativeInt("pool.min_conns", 0, "must be >= 0")
+
+	if result != 3 {
+		t.Errorf("expected 3, got %d", result)
+	}
+}
+
+func TestPromptNonNegativeInt_RejectsNegativeThenAccepts(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	p := &prompter{scanner: newScanner("-1\n2\n"), output: &output, isNew: true}
+
+	result := p.promptNonNegativeInt("pool.min_conns", 0, "must be >= 0")
+
+	if result != 2 {
+		t.Errorf("expected 2, got %d", result)
+	}
+	out := output.String()
+	if !strings.Contains(out, "Value must be >= 0") {
+		t.Errorf("expected >= 0 error message, got: %s", out)
+	}
+}
+
+func TestPromptNonNegativeInt_RejectsNonIntegerThenAccepts(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	p := &prompter{scanner: newScanner("xyz\n5\n"), output: &output, isNew: true}
+
+	result := p.promptNonNegativeInt("pool.min_conns", 0, "must be >= 0")
+
+	if result != 5 {
+		t.Errorf("expected 5, got %d", result)
+	}
+	out := output.String()
+	if !strings.Contains(out, `Invalid integer "xyz"`) {
+		t.Errorf("expected invalid integer error, got: %s", out)
+	}
+}
+
+func TestPromptNonNegativeInt_EmptyKeepsCurrent(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	p := &prompter{scanner: newScanner("\n"), output: &output, isNew: false}
+
+	result := p.promptNonNegativeInt("default_hook_timeout_seconds", 10, "seconds, must be > 0 when hooks are configured")
+
+	if result != 10 {
+		t.Errorf("expected 10, got %d", result)
+	}
+}
+
+// --- promptDuration tests ---
+
+func TestPromptDuration_AcceptsValid(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	p := &prompter{scanner: newScanner("2h\n"), output: &output, isNew: true}
+
+	result := p.promptDuration("pool.max_conn_lifetime", "1h", "Go duration: e.g. 1h, 30m, 1h30m")
+
+	if result != "2h" {
+		t.Errorf("expected '2h', got %q", result)
+	}
+}
+
+func TestPromptDuration_EmptyKeepsCurrent(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	p := &prompter{scanner: newScanner("\n"), output: &output, isNew: true}
+
+	result := p.promptDuration("pool.max_conn_lifetime", "1h", "Go duration: e.g. 1h, 30m, 1h30m")
+
+	if result != "1h" {
+		t.Errorf("expected '1h', got %q", result)
+	}
+}
+
+func TestPromptDuration_RejectsInvalidThenAccepts(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	p := &prompter{scanner: newScanner("notaduration\n30m\n"), output: &output, isNew: true}
+
+	result := p.promptDuration("pool.max_conn_idle_time", "30m", "Go duration: e.g. 1h, 30m, 1h30m")
+
+	if result != "30m" {
+		t.Errorf("expected '30m', got %q", result)
+	}
+	out := output.String()
+	if !strings.Contains(out, `Invalid Go duration "notaduration"`) {
+		t.Errorf("expected invalid duration error, got: %s", out)
+	}
+}
+
+func TestPromptDuration_ShowsHint(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	p := &prompter{scanner: newScanner("\n"), output: &output, isNew: true}
+
+	p.promptDuration("pool.health_check_period", "1m", "Go duration: e.g. 1m, 30s, 1m30s")
+
+	out := output.String()
+	if !strings.Contains(out, "[Go duration: e.g. 1m, 30s, 1m30s]") {
+		t.Errorf("expected duration hint, got: %s", out)
+	}
+}
+
+// --- promptInt re-ask loop tests ---
+
+func TestPromptInt_RejectsNonIntegerThenAccepts(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	p := &prompter{scanner: newScanner("abc\n42\n"), output: &output, isNew: true}
+
+	result := p.promptInt("some_field", 10)
+
+	if result != 42 {
+		t.Errorf("expected 42, got %d", result)
+	}
+	out := output.String()
+	if !strings.Contains(out, `Invalid integer "abc"`) {
+		t.Errorf("expected invalid integer error, got: %s", out)
+	}
+}
+
+func TestPromptInt_MultipleInvalidThenAccepts(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	p := &prompter{scanner: newScanner("bad\nworse\n7\n"), output: &output, isNew: true}
+
+	result := p.promptInt("some_field", 10)
+
+	if result != 7 {
+		t.Errorf("expected 7, got %d", result)
+	}
+	out := output.String()
+	count := strings.Count(out, "Invalid integer")
+	if count != 2 {
+		t.Errorf("expected 2 invalid integer messages, got %d", count)
+	}
+}
+
+// --- promptBool re-ask loop tests ---
+
+func TestPromptBool_RejectsInvalidThenAccepts(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	p := &prompter{scanner: newScanner("maybe\ntrue\n"), output: &output, isNew: true}
+
+	result := p.promptBool("read_only", false)
+
+	if result != true {
+		t.Errorf("expected true, got %v", result)
+	}
+	out := output.String()
+	if !strings.Contains(out, `Invalid value "maybe"`) {
+		t.Errorf("expected invalid boolean error, got: %s", out)
+	}
+	if !strings.Contains(out, "use true/false/yes/no") {
+		t.Errorf("expected guidance on valid values, got: %s", out)
+	}
+}
+
+func TestPromptBool_MultipleInvalidThenAccepts(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	p := &prompter{scanner: newScanner("bad\nworse\nno\n"), output: &output, isNew: true}
+
+	result := p.promptBool("read_only", true)
+
+	if result != false {
+		t.Errorf("expected false, got %v", result)
+	}
+	out := output.String()
+	count := strings.Count(out, "Invalid value")
+	if count != 2 {
+		t.Errorf("expected 2 invalid value messages, got %d", count)
+	}
+}
+
+// --- promptNewRegexField tests ---
+
+func TestPromptNewRegexField_AcceptsValid(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	p := &prompter{scanner: newScanner("^SELECT.*\n"), output: &output, isNew: true}
+
+	result := p.promptNewRegexField("pattern")
+
+	if result != "^SELECT.*" {
+		t.Errorf("expected '^SELECT.*', got %q", result)
+	}
+}
+
+func TestPromptNewRegexField_AcceptsEmpty(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	p := &prompter{scanner: newScanner("\n"), output: &output, isNew: true}
+
+	result := p.promptNewRegexField("pattern")
+
+	if result != "" {
+		t.Errorf("expected empty string, got %q", result)
+	}
+}
+
+func TestPromptNewRegexField_RejectsInvalidThenAccepts(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	p := &prompter{scanner: newScanner("[invalid\n.*valid.*\n"), output: &output, isNew: true}
+
+	result := p.promptNewRegexField("pattern")
+
+	if result != ".*valid.*" {
+		t.Errorf("expected '.*valid.*', got %q", result)
+	}
+	out := output.String()
+	if !strings.Contains(out, `Invalid regex "[invalid"`) {
+		t.Errorf("expected invalid regex error, got: %s", out)
+	}
+}
+
+// --- promptNewPositiveIntField tests ---
+
+func TestPromptNewPositiveIntField_AcceptsValid(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	p := &prompter{scanner: newScanner("30\n"), output: &output, isNew: true}
+
+	result := p.promptNewPositiveIntField("timeout_seconds")
+
+	if result != 30 {
+		t.Errorf("expected 30, got %d", result)
+	}
+}
+
+func TestPromptNewPositiveIntField_RejectsZeroThenAccepts(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	p := &prompter{scanner: newScanner("0\n5\n"), output: &output, isNew: true}
+
+	result := p.promptNewPositiveIntField("timeout_seconds")
+
+	if result != 5 {
+		t.Errorf("expected 5, got %d", result)
+	}
+	out := output.String()
+	if !strings.Contains(out, "Value must be > 0") {
+		t.Errorf("expected > 0 error message, got: %s", out)
+	}
+}
+
+func TestPromptNewPositiveIntField_RejectsEmptyThenAccepts(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	p := &prompter{scanner: newScanner("\n10\n"), output: &output, isNew: true}
+
+	result := p.promptNewPositiveIntField("timeout_seconds")
+
+	if result != 10 {
+		t.Errorf("expected 10, got %d", result)
+	}
+	out := output.String()
+	if !strings.Contains(out, "Value is required and must be > 0") {
+		t.Errorf("expected required error message, got: %s", out)
+	}
+}
+
+// --- promptNewNonNegativeIntField tests ---
+
+func TestPromptNewNonNegativeIntField_AcceptsZero(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	p := &prompter{scanner: newScanner("0\n"), output: &output, isNew: true}
+
+	result := p.promptNewNonNegativeIntField("timeout_seconds")
+
+	if result != 0 {
+		t.Errorf("expected 0, got %d", result)
+	}
+}
+
+func TestPromptNewNonNegativeIntField_AcceptsEmpty(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	p := &prompter{scanner: newScanner("\n"), output: &output, isNew: true}
+
+	result := p.promptNewNonNegativeIntField("timeout_seconds")
+
+	if result != 0 {
+		t.Errorf("expected 0, got %d", result)
+	}
+}
+
+func TestPromptNewNonNegativeIntField_RejectsNegativeThenAccepts(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	p := &prompter{scanner: newScanner("-5\n3\n"), output: &output, isNew: true}
+
+	result := p.promptNewNonNegativeIntField("timeout_seconds")
+
+	if result != 3 {
+		t.Errorf("expected 3, got %d", result)
+	}
+	out := output.String()
+	if !strings.Contains(out, "Value must be >= 0") {
+		t.Errorf("expected >= 0 error message, got: %s", out)
+	}
+}
+
+func TestPromptStringWithHint_ShowsHintAndDefault(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	p := &prompter{
+		scanner: newScanner("\n"),
+		output:  &output,
+		isNew:   true,
+	}
+
+	result := p.promptStringWithHint("logging.output", "stderr", "stdout, stderr, or file path")
+
+	if result != "stderr" {
+		t.Errorf("expected 'stderr', got %q", result)
+	}
+
+	out := output.String()
+	if !strings.Contains(out, "[stdout, stderr, or file path]") {
+		t.Errorf("expected hint in output, got: %s", out)
+	}
+	if !strings.Contains(out, `(default: "stderr")`) {
+		t.Errorf("expected default label, got: %s", out)
+	}
+}
+
+func TestPromptStringWithHint_AcceptsOverride(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	p := &prompter{
+		scanner: newScanner("/var/log/pgmcp.log\n"),
+		output:  &output,
+		isNew:   true,
+	}
+
+	result := p.promptStringWithHint("logging.output", "stderr", "stdout, stderr, or file path")
+
+	if result != "/var/log/pgmcp.log" {
+		t.Errorf("expected '/var/log/pgmcp.log', got %q", result)
+	}
+}
+
+func TestPromptStringWithHint_CurrentLabelForExisting(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	p := &prompter{
+		scanner: newScanner("\n"),
+		output:  &output,
+		isNew:   false,
+	}
+
+	result := p.promptStringWithHint("pool.max_conn_lifetime", "1h", "Go duration: e.g. 1h, 30m, 1h30m")
+
+	if result != "1h" {
+		t.Errorf("expected '1h', got %q", result)
+	}
+
+	out := output.String()
+	if !strings.Contains(out, "[Go duration: e.g. 1h, 30m, 1h30m]") {
+		t.Errorf("expected hint in output, got: %s", out)
+	}
+	if !strings.Contains(out, `(current: "1h")`) {
+		t.Errorf("expected current label, got: %s", out)
+	}
+	if strings.Contains(out, "(default:") {
+		t.Errorf("should not contain default label for existing config, got: %s", out)
 	}
 }
 
