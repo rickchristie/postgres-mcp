@@ -1,6 +1,7 @@
 package hooks
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -523,6 +524,65 @@ func TestHasAfterQueryHooks_False(t *testing.T) {
 
 	if r.HasAfterQueryHooks() {
 		t.Fatal("expected HasAfterQueryHooks to return false")
+	}
+}
+
+func TestBeforeQuery_StderrLoggedAsDebugOnSuccess(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	logger := zerolog.New(&buf).Level(zerolog.DebugLevel)
+	r, err := NewRunner(Config{
+		DefaultTimeout: 5 * time.Second,
+		BeforeQuery: []HookEntry{
+			{Pattern: ".*", Command: hookScript("accept_with_stderr.sh")},
+		},
+	}, logger)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	result, _, err := r.RunBeforeQuery(context.Background(), "SELECT 1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != "SELECT 1" {
+		t.Fatalf("expected query unchanged, got %q", result)
+	}
+
+	logOutput := buf.String()
+	if !strings.Contains(logOutput, "debug info from hook") {
+		t.Fatalf("expected stderr captured in log, got %q", logOutput)
+	}
+	if !strings.Contains(logOutput, `"level":"debug"`) {
+		t.Fatalf("expected debug level log on success, got %q", logOutput)
+	}
+}
+
+func TestBeforeQuery_StderrLoggedAsWarnOnFailure(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	logger := zerolog.New(&buf).Level(zerolog.DebugLevel)
+	r, err := NewRunner(Config{
+		DefaultTimeout: 5 * time.Second,
+		BeforeQuery: []HookEntry{
+			{Pattern: ".*", Command: hookScript("crash_with_stderr.sh")},
+		},
+	}, logger)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	_, _, err = r.RunBeforeQuery(context.Background(), "SELECT 1")
+	if err == nil {
+		t.Fatal("expected error from crash")
+	}
+
+	logOutput := buf.String()
+	if !strings.Contains(logOutput, "error details from hook") {
+		t.Fatalf("expected stderr captured in log, got %q", logOutput)
+	}
+	if !strings.Contains(logOutput, `"level":"warn"`) {
+		t.Fatalf("expected warn level log on failure, got %q", logOutput)
 	}
 }
 

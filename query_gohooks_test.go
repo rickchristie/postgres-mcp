@@ -1,5 +1,3 @@
-//go:build integration
-
 package pgmcp_test
 
 import (
@@ -49,6 +47,16 @@ func (h *slowBeforeHook) Run(ctx context.Context, query string) (string, error) 
 	case <-ctx.Done():
 		return "", ctx.Err()
 	}
+}
+
+// trackingBeforeHook records whether it was called.
+type trackingBeforeHook struct {
+	called bool
+}
+
+func (h *trackingBeforeHook) Run(_ context.Context, query string) (string, error) {
+	h.called = true
+	return query, nil
 }
 
 // passthroughAfterHook returns the result unchanged.
@@ -735,5 +743,30 @@ func TestQuery_GoAfterHook_SelectRollbacksBeforeHooks(t *testing.T) {
 	}
 	if output.Rows[0]["name"] != "test_row" {
 		t.Fatalf("expected 'test_row', got %v", output.Rows[0]["name"])
+	}
+}
+
+func TestQuery_MaxSQLLength_RejectsBeforeHooks(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.Query.MaxSQLLength = 20
+	config.DefaultHookTimeoutSeconds = 5
+
+	tracker := &trackingBeforeHook{}
+	config.BeforeQueryHooks = []pgmcp.BeforeQueryHookEntry{
+		{Name: "tracker", Hook: tracker},
+	}
+	p, _ := newTestInstance(t, config)
+
+	longSQL := "SELECT " + strings.Repeat("1,", 20) + "1"
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: longSQL})
+	if output.Error == "" {
+		t.Fatal("expected SQL length error")
+	}
+	if !strings.Contains(output.Error, "SQL query too long") {
+		t.Fatalf("expected SQL length error, got %q", output.Error)
+	}
+	if tracker.called {
+		t.Fatal("expected BeforeQuery hook to NOT be called when max_sql_length rejects the query")
 	}
 }

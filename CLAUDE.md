@@ -1,6 +1,6 @@
 <testing>
 - When running tests, if database does not exist, ask the user to run `pgflock up`.
-- Integration tests (need a real database) use `//go:build integration` tag, run with `go test -tags integration ./...`
+- All tests (including those needing a real database) run with `go test ./...`
 - pgflock helpers are in `testhelpers_test.go` — use them, don't reinvent:
   - `acquireTestDB(t)` → connStr. Locks a database via pgflock, auto-unlocks via `t.Cleanup`.
   - `newTestInstance(t, config)` → `(*pgmcp.PostgresMcp, connStr)`. Acquires DB + creates instance, auto-cleans up both.
@@ -21,7 +21,6 @@
   }
   ```
 - For raw pgxpool access (e.g., type verification): use `acquireTestDB(t)` directly, create your own pool.
-- Unit tests (no DB) omit the build tag entirely.
 </testing>
 
 <critical_rules>

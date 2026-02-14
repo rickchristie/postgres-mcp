@@ -1,5 +1,3 @@
-//go:build integration
-
 package pgmcp_test
 
 import (
@@ -97,6 +95,77 @@ func TestListTables_IncludesMaterializedViews(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("materialized view not found in list")
+	}
+}
+
+func TestListTables_OwnerField(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.Protection.AllowDDL = true
+	p, connStr := newTestInstance(t, config)
+
+	setupTable(t, p, "CREATE TABLE owner_test (id serial PRIMARY KEY)")
+
+	// Get the current user from the connection string
+	pgxConfig, err := pgx.ParseConfig(connStr)
+	if err != nil {
+		t.Fatalf("failed to parse connStr: %v", err)
+	}
+	expectedOwner := pgxConfig.User
+
+	output, err := p.ListTables(context.Background(), pgmcp.ListTablesInput{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	found := false
+	for _, tbl := range output.Tables {
+		if tbl.Name == "owner_test" {
+			found = true
+			if tbl.Owner != expectedOwner {
+				t.Fatalf("expected owner %q, got %q", expectedOwner, tbl.Owner)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Fatal("expected table 'owner_test' in list")
+	}
+}
+
+func TestListTables_ForeignTable(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.Protection.AllowDDL = true
+	config.Protection.AllowCreateExtension = true
+	p, _ := newTestInstance(t, config)
+
+	// Try to create file_fdw extension — skip if not available
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "CREATE EXTENSION IF NOT EXISTS file_fdw"})
+	if output.Error != "" {
+		t.Skipf("file_fdw extension not available: %s", output.Error)
+	}
+
+	setupTable(t, p, "CREATE SERVER lt_ft_server FOREIGN DATA WRAPPER file_fdw")
+	setupTable(t, p, "CREATE FOREIGN TABLE lt_ft_table (id integer, name text) SERVER lt_ft_server OPTIONS (filename '/dev/null', format 'csv')")
+
+	listOutput, err := p.ListTables(context.Background(), pgmcp.ListTablesInput{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	found := false
+	for _, tbl := range listOutput.Tables {
+		if tbl.Name == "lt_ft_table" {
+			if tbl.Type != "foreign_table" {
+				t.Fatalf("expected type 'foreign_table', got %q", tbl.Type)
+			}
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("foreign table 'lt_ft_table' not found in list")
 	}
 }
 

@@ -13,7 +13,9 @@
       "presentation": {
         "reveal": "always",
         "panel": "dedicated",
-        "focus": true
+        "group": "test",
+        "focus": false,
+        "close": true
       },
       "problemMatcher": []
     },
@@ -25,16 +27,24 @@
       "options": {
         "cwd": "${workspaceFolder}"
       },
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "group": "test",
+        "focus": true,
+        "close": true
+      },
+      "problemMatcher": ["$go"]
+    },
+    {
+      "label": "Test",
+      "dependsOn": ["pgflock: Up Containers", "gowt: Test All"],
+      "dependsOrder": "sequence",
       "group": {
         "kind": "test",
         "isDefault": true
       },
-      "presentation": {
-        "reveal": "always",
-        "panel": "shared",
-        "focus": true
-      },
-      "problemMatcher": ["$go"]
+      "problemMatcher": []
     },
     {
       "label": "Build CLI",

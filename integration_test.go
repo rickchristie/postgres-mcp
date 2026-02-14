@@ -1,5 +1,3 @@
-//go:build integration
-
 package pgmcp_test
 
 import (
@@ -390,6 +388,28 @@ func TestQuery_ErrorPromptEndToEnd(t *testing.T) {
 	}
 }
 
+func TestQuery_MultipleErrorPromptsConcat(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.ErrorPrompts = []pgmcp.ErrorPromptRule{
+		{Pattern: "does not exist", Message: "Hint 1: Try list_tables."},
+		{Pattern: "relation", Message: "Hint 2: Check the table name spelling."},
+	}
+	p, _ := newTestInstance(t, config)
+
+	// This error message contains both "does not exist" and "relation"
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "SELECT * FROM nonexistent_table"})
+	if output.Error == "" {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(output.Error, "Hint 1: Try list_tables.") {
+		t.Fatalf("expected first error prompt, got %q", output.Error)
+	}
+	if !strings.Contains(output.Error, "Hint 2: Check the table name spelling.") {
+		t.Fatalf("expected second error prompt, got %q", output.Error)
+	}
+}
+
 func TestQuery_MaxResultLength(t *testing.T) {
 	t.Parallel()
 	config := defaultConfig()
@@ -444,6 +464,68 @@ func TestQuery_ReadOnlyModeBlocksSetBypass(t *testing.T) {
 	}
 	if !strings.Contains(output.Error, "default_transaction_read_only") {
 		t.Fatalf("expected error about default_transaction_read_only, got %q", output.Error)
+	}
+}
+
+func TestQuery_ReadOnlyBlocksResetAll(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.ReadOnly = true
+	config.Protection.AllowSet = true
+	p, _ := newTestInstance(t, config)
+
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "RESET ALL"})
+	if output.Error == "" {
+		t.Fatal("expected error for RESET ALL in read-only mode")
+	}
+	if !strings.Contains(output.Error, "RESET ALL is blocked in read-only mode") {
+		t.Fatalf("expected RESET ALL blocked message, got %q", output.Error)
+	}
+}
+
+func TestQuery_ReadOnlyBlocksResetTransactionReadOnly(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.ReadOnly = true
+	config.Protection.AllowSet = true
+	p, _ := newTestInstance(t, config)
+
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "RESET default_transaction_read_only"})
+	if output.Error == "" {
+		t.Fatal("expected error for RESET default_transaction_read_only in read-only mode")
+	}
+	if !strings.Contains(output.Error, "RESET default_transaction_read_only is blocked in read-only mode") {
+		t.Fatalf("expected RESET default_transaction_read_only blocked message, got %q", output.Error)
+	}
+}
+
+func TestQuery_ReadOnlyBlocksBeginReadWrite(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.ReadOnly = true
+	p, _ := newTestInstance(t, config)
+
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "BEGIN READ WRITE"})
+	if output.Error == "" {
+		t.Fatal("expected error for BEGIN READ WRITE in read-only mode")
+	}
+	if !strings.Contains(output.Error, "BEGIN READ WRITE is blocked in read-only mode") {
+		t.Fatalf("expected BEGIN READ WRITE blocked message, got %q", output.Error)
+	}
+}
+
+func TestQuery_ReadOnlyBlocksStartTransactionReadWrite(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.ReadOnly = true
+	p, _ := newTestInstance(t, config)
+
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "START TRANSACTION READ WRITE"})
+	if output.Error == "" {
+		t.Fatal("expected error for START TRANSACTION READ WRITE in read-only mode")
+	}
+	if !strings.Contains(output.Error, "BEGIN READ WRITE is blocked in read-only mode") {
+		t.Fatalf("expected BEGIN READ WRITE blocked message, got %q", output.Error)
 	}
 }
 
@@ -1156,6 +1238,29 @@ func TestQuery_TimeoutRuleMatch(t *testing.T) {
 		t.Fatal("expected timeout from rule")
 	}
 	// Should have timed out after ~1s, not 30s
+}
+
+func TestQuery_TimeoutFallbackToDefault(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.Query.DefaultTimeoutSeconds = 1 // short default
+	config.Query.TimeoutRules = []pgmcp.TimeoutRule{
+		{Pattern: "NEVER_MATCH_THIS_PATTERN", TimeoutSeconds: 30},
+	}
+	p, _ := newTestInstance(t, config)
+
+	// This query won't match the rule, so it should use default (1s) and timeout
+	start := time.Now()
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "SELECT pg_sleep(10)"})
+	elapsed := time.Since(start)
+
+	if output.Error == "" {
+		t.Fatal("expected timeout from default timeout")
+	}
+	// Should have timed out after ~1s (default), not 30s (rule)
+	if elapsed > 5*time.Second {
+		t.Fatalf("expected timeout near 1s (default), but took %v", elapsed)
+	}
 }
 
 func TestQuery_InetColumn(t *testing.T) {

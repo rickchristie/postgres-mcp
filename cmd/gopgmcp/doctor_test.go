@@ -180,6 +180,80 @@ func TestDoctorInvalidRegex(t *testing.T) {
 	}
 }
 
+func TestDoctorInvalidRegex_Sanitization(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfg := validServerConfig()
+	cfg.Sanitization = []pgmcp.SanitizationRule{
+		{Pattern: "[bad(regex", Replacement: "x"},
+	}
+	path := writeConfigFile(t, dir, cfg)
+
+	var buf bytes.Buffer
+	err := doctor(&buf, false, path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	output := buf.String()
+
+	if !strings.Contains(output, "✗") {
+		t.Fatalf("expected failure mark (✗) for invalid sanitization regex:\n%s", output)
+	}
+	if !strings.Contains(output, "sanitization[0] regex compiles") {
+		t.Fatalf("expected 'sanitization[0] regex compiles' check in output:\n%s", output)
+	}
+}
+
+func TestDoctorInvalidRegex_TimeoutRules(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfg := validServerConfig()
+	cfg.Query.TimeoutRules = []pgmcp.TimeoutRule{
+		{Pattern: "[bad(regex", TimeoutSeconds: 10},
+	}
+	path := writeConfigFile(t, dir, cfg)
+
+	var buf bytes.Buffer
+	err := doctor(&buf, false, path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	output := buf.String()
+
+	if !strings.Contains(output, "✗") {
+		t.Fatalf("expected failure mark (✗) for invalid timeout_rules regex:\n%s", output)
+	}
+	if !strings.Contains(output, "timeout_rules[0] regex compiles") {
+		t.Fatalf("expected 'timeout_rules[0] regex compiles' check in output:\n%s", output)
+	}
+}
+
+func TestDoctorInvalidRegex_ServerHooks(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfg := validServerConfig()
+	cfg.ServerHooks = pgmcp.ServerHooksConfig{
+		BeforeQuery: []pgmcp.HookEntry{
+			{Pattern: "[bad(regex", Command: "/bin/true"},
+		},
+	}
+	path := writeConfigFile(t, dir, cfg)
+
+	var buf bytes.Buffer
+	err := doctor(&buf, false, path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	output := buf.String()
+
+	if !strings.Contains(output, "✗") {
+		t.Fatalf("expected failure mark (✗) for invalid server_hooks regex:\n%s", output)
+	}
+	if !strings.Contains(output, "server_hooks.before_query[0] regex compiles") {
+		t.Fatalf("expected 'server_hooks.before_query[0] regex compiles' check in output:\n%s", output)
+	}
+}
+
 func TestDoctorPortInSnippets(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

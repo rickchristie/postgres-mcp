@@ -1,5 +1,3 @@
-//go:build integration
-
 package pgmcp_test
 
 import (

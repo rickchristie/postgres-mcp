@@ -1,5 +1,3 @@
-//go:build integration
-
 package pgmcp_test
 
 import (
@@ -259,12 +257,9 @@ func TestMCPServer_HealthCheck(t *testing.T) {
 	}
 
 	body, _ := io.ReadAll(resp.Body)
-	var hc map[string]interface{}
-	if err := json.Unmarshal(body, &hc); err != nil {
-		t.Fatalf("failed to parse health check body: %v", err)
-	}
-	if hc["status"] != "ok" {
-		t.Fatalf("expected status 'ok', got %v", hc["status"])
+	expected := `{"status":"ok"}`
+	if strings.TrimSpace(string(body)) != expected {
+		t.Fatalf("expected exact body %s, got %q", expected, string(body))
 	}
 }
 

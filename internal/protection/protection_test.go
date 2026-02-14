@@ -1229,6 +1229,36 @@ func TestDDL_CreateIndex_Allowed(t *testing.T) {
 	assertAllowed(t, c, "CREATE INDEX idx_name ON users (name)")
 }
 
+func TestDDL_CreateSchema_Allowed(t *testing.T) {
+	t.Parallel()
+	c := NewChecker(Config{AllowDDL: true})
+	assertAllowed(t, c, "CREATE SCHEMA myschema")
+}
+
+func TestDDL_CreateView_Allowed(t *testing.T) {
+	t.Parallel()
+	c := NewChecker(Config{AllowDDL: true})
+	assertAllowed(t, c, "CREATE VIEW active_users AS SELECT * FROM users WHERE active = true")
+}
+
+func TestDDL_CreateSequence_Allowed(t *testing.T) {
+	t.Parallel()
+	c := NewChecker(Config{AllowDDL: true})
+	assertAllowed(t, c, "CREATE SEQUENCE user_id_seq")
+}
+
+func TestDDL_AlterSequence_Allowed(t *testing.T) {
+	t.Parallel()
+	c := NewChecker(Config{AllowDDL: true})
+	assertAllowed(t, c, "ALTER SEQUENCE user_id_seq RESTART WITH 100")
+}
+
+func TestDDL_Rename_Allowed(t *testing.T) {
+	t.Parallel()
+	c := NewChecker(Config{AllowDDL: true})
+	assertAllowed(t, c, "ALTER TABLE users RENAME TO customers")
+}
+
 func TestDDL_DropNotAffectedByDDL(t *testing.T) {
 	t.Parallel()
 	c := NewChecker(Config{AllowDDL: true})

@@ -1,5 +1,3 @@
-//go:build integration
-
 // This file verifies that convertValue (called inside Query pipeline) correctly
 // converts all PostgreSQL types to JSON-friendly Go types. Each test:
 //  1. Creates a table via setupTable (DDL+DML)
@@ -221,7 +219,7 @@ func TestPgxTypes_Text(t *testing.T) {
 	longStr := strings.Repeat("a", 10000)
 	setupTable(t, p, fmt.Sprintf(`INSERT INTO t VALUES ('hello'),(''),('multi
 line
-text'),('special chars: \t \\ ''quote'''),('%s'),(NULL)`, longStr))
+text'),(E'special chars: \t \\ ''quote'''),('%s'),(NULL)`, longStr))
 	rows := queryRows(t, p, `SELECT v FROM t ORDER BY ctid`)
 	assertColumn(t, rows, "v", []interface{}{
 		"hello", "", "multi\nline\ntext", "special chars: \t \\ 'quote'", longStr, nil,
@@ -676,7 +674,7 @@ func TestPgxTypes_TextArray(t *testing.T) {
 	setupTable(t, p, `INSERT INTO t VALUES
 		(ARRAY['a','b','c']),
 		(ARRAY[]::text[]),
-		(ARRAY['with "quotes"','with, comma','with \\ backslash']),
+		(ARRAY['with "quotes"','with, comma',E'with \\ backslash']),
 		(NULL)`)
 	rows := queryRows(t, p, `SELECT v FROM t ORDER BY ctid`)
 	assertColumn(t, rows, "v", []interface{}{

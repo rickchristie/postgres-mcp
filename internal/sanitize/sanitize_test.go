@@ -258,6 +258,56 @@ func TestSanitizeRows(t *testing.T) {
 	}
 }
 
+func TestSanitizeJSONBArray(t *testing.T) {
+	t.Parallel()
+	s, err := NewSanitizer([]Rule{phoneRule})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Simulate a JSONB column containing an array of phone numbers
+	rows := []map[string]interface{}{
+		{
+			"name":   "Alice",
+			"phones": []interface{}{"+62821233447", "+62899887766"},
+		},
+	}
+	result := s.SanitizeRows(rows)
+	phones := result[0]["phones"].([]interface{})
+	if phones[0] != "+62xxx447" {
+		t.Fatalf("expected +62xxx447 for first JSONB array element, got %v", phones[0])
+	}
+	if phones[1] != "+62xxx766" {
+		t.Fatalf("expected +62xxx766 for second JSONB array element, got %v", phones[1])
+	}
+}
+
+func TestSanitizeJSONBArrayNested(t *testing.T) {
+	t.Parallel()
+	s, err := NewSanitizer([]Rule{phoneRule})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// JSONB object containing an array of objects with phone numbers
+	rows := []map[string]interface{}{
+		{
+			"contacts": []interface{}{
+				map[string]interface{}{"phone": "+62821233447"},
+				map[string]interface{}{"phone": "+62899887766"},
+			},
+		},
+	}
+	result := s.SanitizeRows(rows)
+	contacts := result[0]["contacts"].([]interface{})
+	first := contacts[0].(map[string]interface{})
+	if first["phone"] != "+62xxx447" {
+		t.Fatalf("expected +62xxx447 for first nested JSONB array element, got %v", first["phone"])
+	}
+	second := contacts[1].(map[string]interface{})
+	if second["phone"] != "+62xxx766" {
+		t.Fatalf("expected +62xxx766 for second nested JSONB array element, got %v", second["phone"])
+	}
+}
+
 func TestNewSanitizerErrorsOnInvalidRegex(t *testing.T) {
 	t.Parallel()
 	_, err := NewSanitizer([]Rule{

@@ -93,7 +93,7 @@ Regex patterns matched against error messages. Appends contextual guidance for A
 
 ### Additional Features
 - **[Read-only mode](#read-only-mode)** — enforced at connection level (`SET default_transaction_read_only = on`) and protection level (blocks `RESET`, `BEGIN READ WRITE`).
-- **[Timezone management](#timezone)** — set session timezone on every connection (IANA names or PostgreSQL abbreviations).
+- **[Timezone management](#timezone)** — set session timezone on every connection (IANA timezone names).
 - **[Configurable timeouts](#timeout-rules)** — default timeout + regex-based per-query timeout rules. Separate timeouts for `list_tables` and `describe_table`.
 - **[Connection pooling](#connection-pool)** — pgxpool with configurable max/min connections, lifetime, idle time, health checks. Semaphore bounds total concurrent operations.
 - **[30+ PostgreSQL type conversions](#type-handling)** — timestamps, intervals, numerics (arbitrary precision), UUID, bytea, geometric types, ranges, network types, bit strings.
@@ -548,7 +548,7 @@ When `read_only` is `true`:
 
 ### Timezone
 
-Set `timezone` to an IANA timezone name (e.g., `"America/New_York"`, `"Asia/Jakarta"`) or a PostgreSQL abbreviation (e.g., `"UTC"`). Applied via `SET timezone` on every connection. Just like humans, AI agents sometimes forget to check what timezone a timestamp is in — this becomes a real problem when query results are combined with other datasets (like application logs) that use a different timezone. It's less headache to configure one timezone for your entire setup and never think about it again.
+Set `timezone` to an IANA timezone name (e.g., `"America/New_York"`, `"Asia/Jakarta"`, `"UTC"`). Applied via `SET timezone` on every connection. Just like humans, AI agents sometimes forget to check what timezone a timestamp is in — this becomes a real problem when query results are combined with other datasets (like application logs) that use a different timezone. It's less headache to configure one timezone for your entire setup and never think about it again.
 
 ### Timeout Rules
 
@@ -595,7 +595,7 @@ The `max_sql_length` setting (default: 100,000 bytes) similarly rejects queries 
 
 ### Sanitization
 
-Regex-based field-level data masking. Applied to individual cell values in query results. Recursive into JSONB objects and arrays. First matching rule per field wins.
+Regex-based field-level data masking. Applied to individual cell values in query results. Recursive into JSONB objects and arrays. All rules are applied sequentially to each value.
 
 ```json
 {
@@ -798,7 +798,7 @@ flowchart TD
     style R fill:#2d333b,stroke:#56d4dd,color:#c9d1d9
 ```
 
-Read-only statements (SELECT, EXPLAIN, SHOW, SET) are rolled back immediately after collecting results — AfterQuery hooks do not run for read-only queries. Write statements (INSERT, UPDATE, DELETE, etc.) are committed only after AfterQuery hooks approve.
+Read-only statements (SELECT, EXPLAIN, SHOW, SET) are rolled back immediately after collecting results. Write statements (INSERT, UPDATE, DELETE, etc.) are committed only after AfterQuery hooks approve. AfterQuery hooks run for all queries — for read-only queries the transaction is already rolled back, so hooks can inspect results but cannot affect the transaction.
 
 ## SQL Protection Rules
 
