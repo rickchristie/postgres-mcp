@@ -85,10 +85,6 @@ git tag "$new_tag"
 echo "Pushing tag $new_tag..."
 git push origin "$new_tag"
 
-# Create GitHub release
-echo "Creating GitHub release..."
-gh release create "$new_tag" --title "$new_tag" --notes-file "$tmpfile"
-
 # Trigger Go module proxy
 echo "Triggering Go module proxy..."
 GOPROXY=proxy.golang.org go list -m "github.com/rickchristie/postgres-mcp@${new_tag}" 2>/dev/null || true
