@@ -99,6 +99,59 @@ func TestMatchHookError(t *testing.T) {
 	}
 }
 
+func TestMatchedPatterns_SingleMatch(t *testing.T) {
+	t.Parallel()
+	m, err := NewMatcher([]Rule{
+		{Pattern: `(?i)permission denied`, Message: "Check your privileges."},
+		{Pattern: `(?i)relation.*does not exist`, Message: "The table does not exist."},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	patterns := m.MatchedPatterns("permission denied for table users")
+	if len(patterns) != 1 {
+		t.Fatalf("expected 1 matched pattern, got %d", len(patterns))
+	}
+	if patterns[0] != "(?i)permission denied" {
+		t.Fatalf("expected pattern '(?i)permission denied', got %q", patterns[0])
+	}
+}
+
+func TestMatchedPatterns_MultipleMatches(t *testing.T) {
+	t.Parallel()
+	m, err := NewMatcher([]Rule{
+		{Pattern: `(?i)permission denied`, Message: "Check your privileges."},
+		{Pattern: `(?i)denied.*table`, Message: "Verify table access grants."},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	patterns := m.MatchedPatterns("permission denied for table users")
+	if len(patterns) != 2 {
+		t.Fatalf("expected 2 matched patterns, got %d", len(patterns))
+	}
+	if patterns[0] != "(?i)permission denied" {
+		t.Fatalf("expected first pattern '(?i)permission denied', got %q", patterns[0])
+	}
+	if patterns[1] != "(?i)denied.*table" {
+		t.Fatalf("expected second pattern '(?i)denied.*table', got %q", patterns[1])
+	}
+}
+
+func TestMatchedPatterns_NoMatch(t *testing.T) {
+	t.Parallel()
+	m, err := NewMatcher([]Rule{
+		{Pattern: `(?i)permission denied`, Message: "Check your privileges."},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	patterns := m.MatchedPatterns("some other error")
+	if patterns != nil {
+		t.Fatalf("expected nil for no matches, got %v", patterns)
+	}
+}
+
 func TestNewMatcherErrorsOnInvalidRegex(t *testing.T) {
 	t.Parallel()
 	_, err := NewMatcher([]Rule{

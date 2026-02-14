@@ -108,20 +108,23 @@ func (r *Runner) HasAfterQueryHooks() bool {
 }
 
 // RunBeforeQuery runs matching BeforeQuery hooks in middleware chain.
-func (r *Runner) RunBeforeQuery(ctx context.Context, query string) (string, error) {
+// Returns the (possibly modified) query and the list of commands that were executed.
+func (r *Runner) RunBeforeQuery(ctx context.Context, query string) (string, []string, error) {
 	current := query
+	var executed []string
 	for _, hook := range r.beforeQuery {
 		if !hook.pattern.MatchString(current) {
 			continue
 		}
+		executed = append(executed, hook.command)
 		output, err := r.executeHook(ctx, hook, current)
 		if err != nil {
-			return "", fmt.Errorf("before_query hook error: %w", err)
+			return "", executed, fmt.Errorf("before_query hook error: %w", err)
 		}
 
 		var result BeforeQueryResult
 		if err := json.Unmarshal(output, &result); err != nil {
-			return "", fmt.Errorf("before_query hook returned unparseable response (command: %s): %w", hook.command, err)
+			return "", executed, fmt.Errorf("before_query hook returned unparseable response (command: %s): %w", hook.command, err)
 		}
 
 		if !result.Accept {
@@ -129,30 +132,33 @@ func (r *Runner) RunBeforeQuery(ctx context.Context, query string) (string, erro
 			if result.ErrorMessage != "" {
 				errMsg = result.ErrorMessage
 			}
-			return "", errors.New(errMsg)
+			return "", executed, errors.New(errMsg)
 		}
 		if result.ModifiedQuery != "" {
 			current = result.ModifiedQuery
 		}
 	}
-	return current, nil
+	return current, executed, nil
 }
 
 // RunAfterQuery runs matching AfterQuery hooks in middleware chain.
-func (r *Runner) RunAfterQuery(ctx context.Context, resultJSON string) (string, error) {
+// Returns the (possibly modified) result JSON and the list of commands that were executed.
+func (r *Runner) RunAfterQuery(ctx context.Context, resultJSON string) (string, []string, error) {
 	current := resultJSON
+	var executed []string
 	for _, hook := range r.afterQuery {
 		if !hook.pattern.MatchString(current) {
 			continue
 		}
+		executed = append(executed, hook.command)
 		output, err := r.executeHook(ctx, hook, current)
 		if err != nil {
-			return "", fmt.Errorf("after_query hook error: %w", err)
+			return "", executed, fmt.Errorf("after_query hook error: %w", err)
 		}
 
 		var result AfterQueryResult
 		if err := json.Unmarshal(output, &result); err != nil {
-			return "", fmt.Errorf("after_query hook returned unparseable response (command: %s): %w", hook.command, err)
+			return "", executed, fmt.Errorf("after_query hook returned unparseable response (command: %s): %w", hook.command, err)
 		}
 
 		if !result.Accept {
@@ -160,13 +166,13 @@ func (r *Runner) RunAfterQuery(ctx context.Context, resultJSON string) (string, 
 			if result.ErrorMessage != "" {
 				errMsg = result.ErrorMessage
 			}
-			return "", errors.New(errMsg)
+			return "", executed, errors.New(errMsg)
 		}
 		if result.ModifiedResult != "" {
 			current = result.ModifiedResult
 		}
 	}
-	return current, nil
+	return current, executed, nil
 }
 
 func (r *Runner) executeHook(ctx context.Context, hook compiledHook, input string) ([]byte, error) {

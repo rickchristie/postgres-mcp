@@ -465,13 +465,13 @@ func TestExplain_DeleteWithWhereAllowed(t *testing.T) {
 	assertAllowed(t, c, "EXPLAIN ANALYZE DELETE FROM users WHERE id = 1")
 }
 
-func TestExplain_UpdateWithoutWhereBlocked(t *testing.T) {
+func TestExplain_AnalyzeUpdateWithoutWhereBlocked(t *testing.T) {
 	t.Parallel()
 	c := NewChecker(defaultConfig())
 	assertBlocked(t, c, "EXPLAIN ANALYZE UPDATE users SET active = false", "UPDATE without WHERE clause is not allowed")
 }
 
-func TestExplain_UpdateWithWhereAllowed(t *testing.T) {
+func TestExplain_AnalyzeUpdateWithWhereAllowed(t *testing.T) {
 	t.Parallel()
 	c := NewChecker(defaultConfig())
 	assertAllowed(t, c, "EXPLAIN ANALYZE UPDATE users SET active = false WHERE id = 1")
@@ -511,6 +511,176 @@ func TestExplain_CTEDeleteWithoutWhere(t *testing.T) {
 	t.Parallel()
 	c := NewChecker(defaultConfig())
 	assertBlocked(t, c, "EXPLAIN ANALYZE WITH d AS (DELETE FROM users RETURNING *) SELECT * FROM d", "DELETE without WHERE clause is not allowed")
+}
+
+func TestExplain_CTEDeleteWithoutWhereNoAnalyze(t *testing.T) {
+	t.Parallel()
+	c := NewChecker(defaultConfig())
+	assertBlocked(t, c, "EXPLAIN WITH d AS (DELETE FROM users RETURNING *) SELECT * FROM d", "DELETE without WHERE clause is not allowed")
+}
+
+// --- EXPLAIN: Plain EXPLAIN variants (no ANALYZE) ---
+
+func TestExplain_InsertAllowed(t *testing.T) {
+	t.Parallel()
+	c := NewChecker(defaultConfig())
+	assertAllowed(t, c, "EXPLAIN INSERT INTO users (name) VALUES ('test')")
+}
+
+func TestExplain_UpdateWithoutWhereBlocked(t *testing.T) {
+	t.Parallel()
+	c := NewChecker(defaultConfig())
+	assertBlocked(t, c, "EXPLAIN UPDATE users SET active = false", "UPDATE without WHERE clause is not allowed")
+}
+
+func TestExplain_UpdateWithWhereAllowed(t *testing.T) {
+	t.Parallel()
+	c := NewChecker(defaultConfig())
+	assertAllowed(t, c, "EXPLAIN UPDATE users SET active = false WHERE id = 1")
+}
+
+func TestExplain_DeleteWithWhereAllowedNoAnalyze(t *testing.T) {
+	t.Parallel()
+	c := NewChecker(defaultConfig())
+	assertAllowed(t, c, "EXPLAIN DELETE FROM users WHERE id = 1")
+}
+
+func TestExplain_MergeBlocked(t *testing.T) {
+	t.Parallel()
+	c := NewChecker(defaultConfig())
+	assertBlocked(t, c, "EXPLAIN MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN UPDATE SET name = s.name", "MERGE statements are not allowed")
+}
+
+func TestExplain_MergeAllowed(t *testing.T) {
+	t.Parallel()
+	c := NewChecker(Config{AllowMerge: true})
+	assertAllowed(t, c, "EXPLAIN MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN UPDATE SET name = s.name")
+}
+
+// --- EXPLAIN: CREATE TABLE AS (DDL) ---
+
+func TestExplain_CreateTableAsBlocked(t *testing.T) {
+	t.Parallel()
+	c := NewChecker(defaultConfig())
+	assertBlocked(t, c, "EXPLAIN CREATE TABLE summary AS SELECT COUNT(*) FROM users", "CREATE TABLE AS / CREATE MATERIALIZED VIEW is not allowed: DDL operations are blocked")
+}
+
+func TestExplain_AnalyzeCreateTableAsBlocked(t *testing.T) {
+	t.Parallel()
+	c := NewChecker(defaultConfig())
+	assertBlocked(t, c, "EXPLAIN ANALYZE CREATE TABLE summary AS SELECT COUNT(*) FROM users", "CREATE TABLE AS / CREATE MATERIALIZED VIEW is not allowed: DDL operations are blocked")
+}
+
+func TestExplain_CreateTableAsAllowed(t *testing.T) {
+	t.Parallel()
+	c := NewChecker(Config{AllowDDL: true})
+	assertAllowed(t, c, "EXPLAIN CREATE TABLE summary AS SELECT COUNT(*) FROM users")
+}
+
+func TestExplain_AnalyzeCreateTableAsAllowed(t *testing.T) {
+	t.Parallel()
+	c := NewChecker(Config{AllowDDL: true})
+	assertAllowed(t, c, "EXPLAIN ANALYZE CREATE TABLE summary AS SELECT COUNT(*) FROM users")
+}
+
+// --- EXPLAIN: CREATE MATERIALIZED VIEW AS (DDL) ---
+
+func TestExplain_CreateMatViewBlocked(t *testing.T) {
+	t.Parallel()
+	c := NewChecker(defaultConfig())
+	assertBlocked(t, c, "EXPLAIN CREATE MATERIALIZED VIEW mv AS SELECT COUNT(*) FROM users", "CREATE TABLE AS / CREATE MATERIALIZED VIEW is not allowed: DDL operations are blocked")
+}
+
+func TestExplain_AnalyzeCreateMatViewBlocked(t *testing.T) {
+	t.Parallel()
+	c := NewChecker(defaultConfig())
+	assertBlocked(t, c, "EXPLAIN ANALYZE CREATE MATERIALIZED VIEW mv AS SELECT COUNT(*) FROM users", "CREATE TABLE AS / CREATE MATERIALIZED VIEW is not allowed: DDL operations are blocked")
+}
+
+func TestExplain_CreateMatViewAllowed(t *testing.T) {
+	t.Parallel()
+	c := NewChecker(Config{AllowDDL: true})
+	assertAllowed(t, c, "EXPLAIN CREATE MATERIALIZED VIEW mv AS SELECT COUNT(*) FROM users")
+}
+
+func TestExplain_AnalyzeCreateMatViewAllowed(t *testing.T) {
+	t.Parallel()
+	c := NewChecker(Config{AllowDDL: true})
+	assertAllowed(t, c, "EXPLAIN ANALYZE CREATE MATERIALIZED VIEW mv AS SELECT COUNT(*) FROM users")
+}
+
+// --- EXPLAIN: EXECUTE (AllowPrepare) ---
+
+func TestExplain_ExecuteBlocked(t *testing.T) {
+	t.Parallel()
+	c := NewChecker(defaultConfig())
+	assertBlocked(t, c, "EXPLAIN EXECUTE stmt", "EXECUTE statements are not allowed: can execute prepared statements that bypass protection checks")
+}
+
+func TestExplain_AnalyzeExecuteBlocked(t *testing.T) {
+	t.Parallel()
+	c := NewChecker(defaultConfig())
+	assertBlocked(t, c, "EXPLAIN ANALYZE EXECUTE stmt", "EXECUTE statements are not allowed: can execute prepared statements that bypass protection checks")
+}
+
+func TestExplain_ExecuteAllowed(t *testing.T) {
+	t.Parallel()
+	c := NewChecker(Config{AllowPrepare: true})
+	assertAllowed(t, c, "EXPLAIN EXECUTE stmt")
+}
+
+func TestExplain_AnalyzeExecuteAllowed(t *testing.T) {
+	t.Parallel()
+	c := NewChecker(Config{AllowPrepare: true})
+	assertAllowed(t, c, "EXPLAIN ANALYZE EXECUTE stmt")
+}
+
+// --- EXPLAIN: REFRESH MATERIALIZED VIEW (AllowMaintenance) ---
+
+func TestExplain_RefreshMatViewBlocked(t *testing.T) {
+	t.Parallel()
+	c := NewChecker(defaultConfig())
+	assertBlocked(t, c, "EXPLAIN REFRESH MATERIALIZED VIEW mv", "REFRESH MATERIALIZED VIEW is not allowed")
+}
+
+func TestExplain_AnalyzeRefreshMatViewBlocked(t *testing.T) {
+	t.Parallel()
+	c := NewChecker(defaultConfig())
+	assertBlocked(t, c, "EXPLAIN ANALYZE REFRESH MATERIALIZED VIEW mv", "REFRESH MATERIALIZED VIEW is not allowed")
+}
+
+func TestExplain_RefreshMatViewAllowed(t *testing.T) {
+	t.Parallel()
+	c := NewChecker(Config{AllowMaintenance: true})
+	assertAllowed(t, c, "EXPLAIN REFRESH MATERIALIZED VIEW mv")
+}
+
+func TestExplain_AnalyzeRefreshMatViewAllowed(t *testing.T) {
+	t.Parallel()
+	c := NewChecker(Config{AllowMaintenance: true})
+	assertAllowed(t, c, "EXPLAIN ANALYZE REFRESH MATERIALIZED VIEW mv")
+}
+
+// --- EXPLAIN: DECLARE CURSOR (always allowed — no protection rule) ---
+
+func TestExplain_DeclareCursorAllowed(t *testing.T) {
+	t.Parallel()
+	c := NewChecker(defaultConfig())
+	assertAllowed(t, c, "EXPLAIN DECLARE cur CURSOR FOR SELECT * FROM users")
+}
+
+func TestExplain_AnalyzeDeclareCursorAllowed(t *testing.T) {
+	t.Parallel()
+	c := NewChecker(defaultConfig())
+	assertAllowed(t, c, "EXPLAIN ANALYZE DECLARE cur CURSOR FOR SELECT * FROM users")
+}
+
+// --- EXPLAIN: Non-ExplainableStmt parse errors (TRUNCATE without ANALYZE) ---
+
+func TestExplain_TruncateParseErrorNoAnalyze(t *testing.T) {
+	t.Parallel()
+	c := NewChecker(defaultConfig())
+	assertBlocked(t, c, "EXPLAIN TRUNCATE users", "SQL parse error")
 }
 
 // --- DELETE/UPDATE with WHERE ---
@@ -1439,6 +1609,34 @@ func TestCTEMultipleDML(t *testing.T) {
 	t.Parallel()
 	c := NewChecker(defaultConfig())
 	assertAllowed(t, c, "WITH d AS (DELETE FROM old_users WHERE expired = true RETURNING *), i AS (INSERT INTO archive SELECT * FROM d RETURNING *) SELECT * FROM i")
+}
+
+func TestCTEWithInsert(t *testing.T) {
+	t.Parallel()
+	c := NewChecker(defaultConfig())
+	assertAllowed(t, c, "WITH ins AS (INSERT INTO archive (name) VALUES ('test') RETURNING *) SELECT * FROM ins")
+}
+
+func TestCTEWithInsertOnConflict(t *testing.T) {
+	t.Parallel()
+	c := NewChecker(defaultConfig())
+	assertAllowed(t, c, "WITH ins AS (INSERT INTO users (id, name) VALUES (1, 'test') ON CONFLICT (id) DO UPDATE SET name = 'test' RETURNING *) SELECT * FROM ins")
+}
+
+// Note: pg_query_go (PostgreSQL parser) accepts MERGE inside CTEs, but PostgreSQL's
+// execution engine rejects it at runtime with "MERGE not supported in WITH query".
+// These tests verify AST-level protection checking is correct regardless.
+
+func TestCTEWithMergeBlocked(t *testing.T) {
+	t.Parallel()
+	c := NewChecker(defaultConfig())
+	assertBlocked(t, c, "WITH m AS (MERGE INTO target t USING source s ON t.id = s.id WHEN MATCHED THEN UPDATE SET name = s.name) SELECT 1", "MERGE statements are not allowed")
+}
+
+func TestCTEWithMergeAllowed(t *testing.T) {
+	t.Parallel()
+	c := NewChecker(Config{AllowMerge: true})
+	assertAllowed(t, c, "WITH m AS (MERGE INTO target t USING source s ON t.id = s.id WHEN MATCHED THEN UPDATE SET name = s.name) SELECT 1")
 }
 
 func TestCTEOnMerge_DeleteNoWhere(t *testing.T) {

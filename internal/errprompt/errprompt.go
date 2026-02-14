@@ -47,3 +47,15 @@ func (m *Matcher) Match(errMsg string) string {
 	}
 	return strings.Join(matches, "\n")
 }
+
+// MatchedPatterns returns the regex patterns that matched the given error message.
+// Returns nil if no match.
+func (m *Matcher) MatchedPatterns(errMsg string) []string {
+	var patterns []string
+	for _, rule := range m.rules {
+		if rule.pattern.MatchString(errMsg) {
+			patterns = append(patterns, rule.pattern.String())
+		}
+	}
+	return patterns
+}

@@ -45,10 +45,17 @@ func NewManager(config Config) (*Manager, error) {
 // GetTimeout returns the timeout for the given SQL.
 // First matching rule wins. Falls back to default.
 func (m *Manager) GetTimeout(sql string) time.Duration {
+	t, _ := m.GetTimeoutWithPattern(sql)
+	return t
+}
+
+// GetTimeoutWithPattern returns the timeout and the matched pattern for the given SQL.
+// If no rule matches, returns the default timeout and an empty string.
+func (m *Manager) GetTimeoutWithPattern(sql string) (time.Duration, string) {
 	for _, rule := range m.rules {
 		if rule.pattern.MatchString(sql) {
-			return rule.timeout
+			return rule.timeout, rule.pattern.String()
 		}
 	}
-	return m.defaultTimeout
+	return m.defaultTimeout, ""
 }

@@ -52,7 +52,15 @@ func runServe() error {
 	}
 	defer pgMcp.Close(ctx)
 
-	// 5. Create MCP server with initialize lifecycle logging
+	// 5. Test database connection
+	logger.Info().Msg("testing database connection")
+	if err := pgMcp.Ping(ctx); err != nil {
+		logger.Error().Err(err).Msg("database connection test failed")
+		return fmt.Errorf("database connection test failed: %w", err)
+	}
+	logger.Info().Msg("database connection test successful")
+
+	// 6. Create MCP server with initialize lifecycle logging
 	hooks := &server.Hooks{}
 	hooks.AddAfterInitialize(func(ctx context.Context, id any, req *mcp.InitializeRequest, result *mcp.InitializeResult) {
 		clientName := req.Params.ClientInfo.Name

@@ -34,6 +34,11 @@ func NewSanitizer(rules []Rule) (*Sanitizer, error) {
 	return &Sanitizer{rules: compiled}, nil
 }
 
+// HasRules returns true if the sanitizer has any rules configured.
+func (s *Sanitizer) HasRules() bool {
+	return len(s.rules) > 0
+}
+
 // SanitizeRows applies sanitization to each field value in the result rows.
 // For JSONB/array fields (map[string]interface{}, []interface{}),
 // recurses into primitive values.

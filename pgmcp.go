@@ -274,6 +274,11 @@ func New(ctx context.Context, connString string, config Config, logger zerolog.L
 	}, nil
 }
 
+// Ping verifies the database connection by acquiring a connection and running a simple query.
+func (p *PostgresMcp) Ping(ctx context.Context) error {
+	return p.pool.Ping(ctx)
+}
+
 // Close closes the connection pool. Accepts context for API forward-compatibility,
 // but does not currently use it — pgxpool.Pool.Close() does not support context-based shutdown.
 func (p *PostgresMcp) Close(ctx context.Context) {

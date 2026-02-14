@@ -82,3 +82,32 @@ func setupTable(t *testing.T, p *pgmcp.PostgresMcp, sql string) {
 		t.Fatalf("setup failed: %s", output.Error)
 	}
 }
+
+// newReadOnlyTestInstance creates a read-only PostgresMcp instance with tables
+// pre-populated by setupFn. It first creates a write instance to run DDL/DML,
+// then closes it and creates a read-only instance with the given config.
+func newReadOnlyTestInstance(t *testing.T, config pgmcp.Config, setupFn func(t *testing.T, p *pgmcp.PostgresMcp)) *pgmcp.PostgresMcp {
+	t.Helper()
+	connStr := acquireTestDB(t)
+	ctx := context.Background()
+
+	// Set up tables with a write instance
+	setupConfig := defaultConfig()
+	setupConfig.Protection.AllowDDL = true
+	setupConfig.Protection.AllowMerge = true
+	setupP, err := pgmcp.New(ctx, connStr, setupConfig, testLogger())
+	if err != nil {
+		t.Fatalf("failed to create setup instance: %v", err)
+	}
+	setupFn(t, setupP)
+	setupP.Close(ctx)
+
+	// Create read-only instance
+	config.ReadOnly = true
+	p, err := pgmcp.New(ctx, connStr, config, testLogger())
+	if err != nil {
+		t.Fatalf("failed to create read-only instance: %v", err)
+	}
+	t.Cleanup(func() { p.Close(ctx) })
+	return p
+}

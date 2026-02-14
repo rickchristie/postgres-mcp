@@ -39,12 +39,20 @@ func (p *PostgresMcp) Query(ctx context.Context, input QueryInput) *QueryOutput 
 		return p.handleError(fmt.Errorf("SQL query too long: %d bytes exceeds maximum of %d bytes", len(sql), p.config.Query.MaxSQLLength))
 	}
 
+	// --- Pipeline tracking ---
+	var beforeHooks, afterHooks []string
+	timeoutRule := ""
+	sanitized := false
+
 	// 3. Run BeforeQuery hooks (middleware chain)
 	var err error
 	if len(p.goBeforeHooks) > 0 {
 		sql, err = p.runGoBeforeHooks(ctx, sql)
+		for _, entry := range p.goBeforeHooks {
+			beforeHooks = append(beforeHooks, entry.Name)
+		}
 	} else if p.cmdHooks != nil {
-		sql, err = p.cmdHooks.RunBeforeQuery(ctx, sql)
+		sql, beforeHooks, err = p.cmdHooks.RunBeforeQuery(ctx, sql)
 	}
 	if err != nil {
 		return p.handleError(err)
@@ -56,7 +64,8 @@ func (p *PostgresMcp) Query(ctx context.Context, input QueryInput) *QueryOutput 
 	}
 
 	// 5. Determine timeout
-	timeout := p.timeoutMgr.GetTimeout(sql)
+	var timeout time.Duration
+	timeout, timeoutRule = p.timeoutMgr.GetTimeoutWithPattern(sql)
 	queryCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -100,16 +109,20 @@ func (p *PostgresMcp) Query(ctx context.Context, input QueryInput) *QueryOutput 
 		if err != nil {
 			return p.handleError(err)
 		}
+		for _, entry := range p.goAfterHooks {
+			afterHooks = append(afterHooks, entry.Name)
+		}
 	} else if p.cmdHooks != nil && p.cmdHooks.HasAfterQueryHooks() {
 		resultJSON, err := json.Marshal(result)
 		if err != nil {
 			return p.handleError(err)
 		}
 
-		modifiedJSON, err := p.cmdHooks.RunAfterQuery(ctx, string(resultJSON))
+		modifiedJSON, executed, err := p.cmdHooks.RunAfterQuery(ctx, string(resultJSON))
 		if err != nil {
 			return p.handleError(err)
 		}
+		afterHooks = executed
 
 		finalResult = &QueryOutput{}
 		dec := json.NewDecoder(strings.NewReader(modifiedJSON))
@@ -130,18 +143,31 @@ func (p *PostgresMcp) Query(ctx context.Context, input QueryInput) *QueryOutput 
 	}
 
 	// 12. Apply sanitization (per-field, recursive into JSONB/arrays)
+	sanitized = p.sanitizer.HasRules()
 	finalResult.Rows = p.sanitizer.SanitizeRows(finalResult.Rows)
 
 	// 13. Apply max result length truncation
 	p.truncateIfNeeded(finalResult)
 
-	// 14. Log successful query execution
-	p.logger.Info().
+	// 14. Log successful query execution with pipeline details
+	logEvent := p.logger.Info().
 		Str("sql", truncateForLog(sql, 200)).
 		Dur("duration", time.Since(startTime)).
 		Int("row_count", len(finalResult.Rows)).
-		Int64("rows_affected", finalResult.RowsAffected).
-		Msg("query executed")
+		Int64("rows_affected", finalResult.RowsAffected)
+	if len(beforeHooks) > 0 {
+		logEvent = logEvent.Strs("before_hooks", beforeHooks)
+	}
+	if len(afterHooks) > 0 {
+		logEvent = logEvent.Strs("after_hooks", afterHooks)
+	}
+	if timeoutRule != "" {
+		logEvent = logEvent.Str("timeout_rule", timeoutRule)
+	}
+	if sanitized {
+		logEvent = logEvent.Bool("sanitized", true)
+	}
+	logEvent.Msg("query executed")
 
 	return finalResult
 }
@@ -451,10 +477,16 @@ func convertValue(v interface{}) interface{} {
 // handleError converts any error into a QueryOutput with error message.
 // The error message is evaluated against error_prompts — matching prompt messages are appended.
 func (p *PostgresMcp) handleError(err error) *QueryOutput {
-	p.logger.Error().Err(err).Msg("query error")
-
 	errMsg := err.Error()
 	prompt := p.errPrompts.Match(errMsg)
+	patterns := p.errPrompts.MatchedPatterns(errMsg)
+
+	logEvent := p.logger.Error().Err(err)
+	if len(patterns) > 0 {
+		logEvent = logEvent.Strs("error_prompts", patterns)
+	}
+	logEvent.Msg("query error")
+
 	if prompt != "" {
 		errMsg = errMsg + "\n\n" + prompt
 	}

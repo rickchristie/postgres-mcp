@@ -447,6 +447,339 @@ func TestQuery_ReadOnlyModeBlocksSetBypass(t *testing.T) {
 	}
 }
 
+// --- Read-Only Mode: Direct DML Blocked ---
+
+func TestQuery_ReadOnlyBlocksInsert(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	p := newReadOnlyTestInstance(t, config, func(t *testing.T, p *pgmcp.PostgresMcp) {
+		setupTable(t, p, "CREATE TABLE ro_insert (id serial PRIMARY KEY, name text)")
+	})
+
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "INSERT INTO ro_insert (name) VALUES ('test')"})
+	if output.Error == "" {
+		t.Fatal("expected error for INSERT in read-only mode")
+	}
+	if !strings.Contains(output.Error, "read-only transaction") {
+		t.Fatalf("expected read-only transaction error, got: %s", output.Error)
+	}
+}
+
+func TestQuery_ReadOnlyBlocksUpdate(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	p := newReadOnlyTestInstance(t, config, func(t *testing.T, p *pgmcp.PostgresMcp) {
+		setupTable(t, p, "CREATE TABLE ro_update (id serial PRIMARY KEY, name text)")
+		setupTable(t, p, "INSERT INTO ro_update (name) VALUES ('Alice')")
+	})
+
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "UPDATE ro_update SET name = 'Bob' WHERE id = 1"})
+	if output.Error == "" {
+		t.Fatal("expected error for UPDATE in read-only mode")
+	}
+	if !strings.Contains(output.Error, "read-only transaction") {
+		t.Fatalf("expected read-only transaction error, got: %s", output.Error)
+	}
+}
+
+func TestQuery_ReadOnlyBlocksDelete(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	p := newReadOnlyTestInstance(t, config, func(t *testing.T, p *pgmcp.PostgresMcp) {
+		setupTable(t, p, "CREATE TABLE ro_delete (id serial PRIMARY KEY, name text)")
+		setupTable(t, p, "INSERT INTO ro_delete (name) VALUES ('Alice')")
+	})
+
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "DELETE FROM ro_delete WHERE id = 1"})
+	if output.Error == "" {
+		t.Fatal("expected error for DELETE in read-only mode")
+	}
+	if !strings.Contains(output.Error, "read-only transaction") {
+		t.Fatalf("expected read-only transaction error, got: %s", output.Error)
+	}
+}
+
+func TestQuery_ReadOnlyBlocksMerge(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.Protection.AllowMerge = true
+	p := newReadOnlyTestInstance(t, config, func(t *testing.T, p *pgmcp.PostgresMcp) {
+		setupTable(t, p, "CREATE TABLE ro_merge_target (id int PRIMARY KEY, name text)")
+		setupTable(t, p, "CREATE TABLE ro_merge_source (id int PRIMARY KEY, name text)")
+		setupTable(t, p, "INSERT INTO ro_merge_target (id, name) VALUES (1, 'Alice')")
+		setupTable(t, p, "INSERT INTO ro_merge_source (id, name) VALUES (1, 'Bob')")
+	})
+
+	output := p.Query(context.Background(), pgmcp.QueryInput{
+		SQL: "MERGE INTO ro_merge_target t USING ro_merge_source s ON t.id = s.id WHEN MATCHED THEN UPDATE SET name = s.name",
+	})
+	if output.Error == "" {
+		t.Fatal("expected error for MERGE in read-only mode")
+	}
+	if !strings.Contains(output.Error, "read-only transaction") {
+		t.Fatalf("expected read-only transaction error, got: %s", output.Error)
+	}
+}
+
+// --- Read-Only Mode: DML Inside CTEs Blocked ---
+
+func TestQuery_ReadOnlyBlocksCTEInsert(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	p := newReadOnlyTestInstance(t, config, func(t *testing.T, p *pgmcp.PostgresMcp) {
+		setupTable(t, p, "CREATE TABLE ro_cte_insert (id serial PRIMARY KEY, name text)")
+	})
+
+	output := p.Query(context.Background(), pgmcp.QueryInput{
+		SQL: "WITH ins AS (INSERT INTO ro_cte_insert (name) VALUES ('test') RETURNING *) SELECT * FROM ins",
+	})
+	if output.Error == "" {
+		t.Fatal("expected error for INSERT inside CTE in read-only mode")
+	}
+	if !strings.Contains(output.Error, "read-only transaction") {
+		t.Fatalf("expected read-only transaction error, got: %s", output.Error)
+	}
+}
+
+func TestQuery_ReadOnlyBlocksCTEUpdate(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	p := newReadOnlyTestInstance(t, config, func(t *testing.T, p *pgmcp.PostgresMcp) {
+		setupTable(t, p, "CREATE TABLE ro_cte_update (id serial PRIMARY KEY, name text)")
+		setupTable(t, p, "INSERT INTO ro_cte_update (name) VALUES ('Alice')")
+	})
+
+	output := p.Query(context.Background(), pgmcp.QueryInput{
+		SQL: "WITH upd AS (UPDATE ro_cte_update SET name = 'Bob' WHERE id = 1 RETURNING *) SELECT * FROM upd",
+	})
+	if output.Error == "" {
+		t.Fatal("expected error for UPDATE inside CTE in read-only mode")
+	}
+	if !strings.Contains(output.Error, "read-only transaction") {
+		t.Fatalf("expected read-only transaction error, got: %s", output.Error)
+	}
+}
+
+func TestQuery_ReadOnlyBlocksCTEDelete(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	p := newReadOnlyTestInstance(t, config, func(t *testing.T, p *pgmcp.PostgresMcp) {
+		setupTable(t, p, "CREATE TABLE ro_cte_delete (id serial PRIMARY KEY, name text)")
+		setupTable(t, p, "INSERT INTO ro_cte_delete (name) VALUES ('Alice')")
+	})
+
+	output := p.Query(context.Background(), pgmcp.QueryInput{
+		SQL: "WITH del AS (DELETE FROM ro_cte_delete WHERE id = 1 RETURNING *) SELECT * FROM del",
+	})
+	if output.Error == "" {
+		t.Fatal("expected error for DELETE inside CTE in read-only mode")
+	}
+	if !strings.Contains(output.Error, "read-only transaction") {
+		t.Fatalf("expected read-only transaction error, got: %s", output.Error)
+	}
+}
+
+func TestQuery_ReadOnlyBlocksCTEMerge(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.Protection.AllowMerge = true
+	p := newReadOnlyTestInstance(t, config, func(t *testing.T, p *pgmcp.PostgresMcp) {
+		setupTable(t, p, "CREATE TABLE ro_cte_merge_target (id int PRIMARY KEY, name text)")
+		setupTable(t, p, "CREATE TABLE ro_cte_merge_source (id int PRIMARY KEY, name text)")
+		setupTable(t, p, "INSERT INTO ro_cte_merge_target (id, name) VALUES (1, 'Alice')")
+		setupTable(t, p, "INSERT INTO ro_cte_merge_source (id, name) VALUES (1, 'Bob')")
+	})
+
+	// PostgreSQL's parser accepts MERGE in CTEs (pg_query_go parses it), but the
+	// execution engine rejects it: "MERGE not supported in WITH query".
+	// This error occurs before the read-only check, so we verify it's blocked regardless.
+	output := p.Query(context.Background(), pgmcp.QueryInput{
+		SQL: "WITH m AS (MERGE INTO ro_cte_merge_target t USING ro_cte_merge_source s ON t.id = s.id WHEN MATCHED THEN UPDATE SET name = s.name) SELECT 1",
+	})
+	if output.Error == "" {
+		t.Fatal("expected error for MERGE inside CTE in read-only mode")
+	}
+	if !strings.Contains(output.Error, "MERGE not supported in WITH query") {
+		t.Fatalf("expected 'MERGE not supported in WITH query' error, got: %s", output.Error)
+	}
+}
+
+// --- Read-Only Mode: EXPLAIN (no ANALYZE) Allows DML Planning ---
+
+func TestQuery_ReadOnlyAllowsExplainInsert(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	p := newReadOnlyTestInstance(t, config, func(t *testing.T, p *pgmcp.PostgresMcp) {
+		setupTable(t, p, "CREATE TABLE ro_explain_insert (id serial PRIMARY KEY, name text)")
+	})
+
+	// EXPLAIN without ANALYZE only plans — doesn't execute DML
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "EXPLAIN INSERT INTO ro_explain_insert (name) VALUES ('test')"})
+	if output.Error != "" {
+		t.Fatalf("EXPLAIN INSERT should work in read-only mode (planning only): %s", output.Error)
+	}
+}
+
+func TestQuery_ReadOnlyAllowsExplainUpdate(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	p := newReadOnlyTestInstance(t, config, func(t *testing.T, p *pgmcp.PostgresMcp) {
+		setupTable(t, p, "CREATE TABLE ro_explain_update (id serial PRIMARY KEY, name text)")
+	})
+
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "EXPLAIN UPDATE ro_explain_update SET name = 'Bob' WHERE id = 1"})
+	if output.Error != "" {
+		t.Fatalf("EXPLAIN UPDATE should work in read-only mode (planning only): %s", output.Error)
+	}
+}
+
+func TestQuery_ReadOnlyAllowsExplainDelete(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	p := newReadOnlyTestInstance(t, config, func(t *testing.T, p *pgmcp.PostgresMcp) {
+		setupTable(t, p, "CREATE TABLE ro_explain_delete (id serial PRIMARY KEY, name text)")
+	})
+
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "EXPLAIN DELETE FROM ro_explain_delete WHERE id = 1"})
+	if output.Error != "" {
+		t.Fatalf("EXPLAIN DELETE should work in read-only mode (planning only): %s", output.Error)
+	}
+}
+
+func TestQuery_ReadOnlyAllowsExplainMerge(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.Protection.AllowMerge = true
+	p := newReadOnlyTestInstance(t, config, func(t *testing.T, p *pgmcp.PostgresMcp) {
+		setupTable(t, p, "CREATE TABLE ro_explain_merge_t (id int PRIMARY KEY, name text)")
+		setupTable(t, p, "CREATE TABLE ro_explain_merge_s (id int PRIMARY KEY, name text)")
+	})
+
+	output := p.Query(context.Background(), pgmcp.QueryInput{
+		SQL: "EXPLAIN MERGE INTO ro_explain_merge_t t USING ro_explain_merge_s s ON t.id = s.id WHEN MATCHED THEN UPDATE SET name = s.name",
+	})
+	if output.Error != "" {
+		t.Fatalf("EXPLAIN MERGE should work in read-only mode (planning only): %s", output.Error)
+	}
+}
+
+// --- Read-Only Mode: EXPLAIN ANALYZE Blocks DML (actually executes) ---
+
+func TestQuery_ReadOnlyBlocksExplainAnalyzeInsert(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	p := newReadOnlyTestInstance(t, config, func(t *testing.T, p *pgmcp.PostgresMcp) {
+		setupTable(t, p, "CREATE TABLE ro_ea_insert (id serial PRIMARY KEY, name text)")
+	})
+
+	// EXPLAIN ANALYZE actually executes the DML — should fail in read-only
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "EXPLAIN ANALYZE INSERT INTO ro_ea_insert (name) VALUES ('test')"})
+	if output.Error == "" {
+		t.Fatal("expected error for EXPLAIN ANALYZE INSERT in read-only mode")
+	}
+	if !strings.Contains(output.Error, "read-only transaction") {
+		t.Fatalf("expected read-only transaction error, got: %s", output.Error)
+	}
+}
+
+func TestQuery_ReadOnlyBlocksExplainAnalyzeUpdate(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	p := newReadOnlyTestInstance(t, config, func(t *testing.T, p *pgmcp.PostgresMcp) {
+		setupTable(t, p, "CREATE TABLE ro_ea_update (id serial PRIMARY KEY, name text)")
+		setupTable(t, p, "INSERT INTO ro_ea_update (name) VALUES ('Alice')")
+	})
+
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "EXPLAIN ANALYZE UPDATE ro_ea_update SET name = 'Bob' WHERE id = 1"})
+	if output.Error == "" {
+		t.Fatal("expected error for EXPLAIN ANALYZE UPDATE in read-only mode")
+	}
+	if !strings.Contains(output.Error, "read-only transaction") {
+		t.Fatalf("expected read-only transaction error, got: %s", output.Error)
+	}
+}
+
+func TestQuery_ReadOnlyBlocksExplainAnalyzeDelete(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	p := newReadOnlyTestInstance(t, config, func(t *testing.T, p *pgmcp.PostgresMcp) {
+		setupTable(t, p, "CREATE TABLE ro_ea_delete (id serial PRIMARY KEY, name text)")
+		setupTable(t, p, "INSERT INTO ro_ea_delete (name) VALUES ('Alice')")
+	})
+
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "EXPLAIN ANALYZE DELETE FROM ro_ea_delete WHERE id = 1"})
+	if output.Error == "" {
+		t.Fatal("expected error for EXPLAIN ANALYZE DELETE in read-only mode")
+	}
+	if !strings.Contains(output.Error, "read-only transaction") {
+		t.Fatalf("expected read-only transaction error, got: %s", output.Error)
+	}
+}
+
+func TestQuery_ReadOnlyBlocksExplainAnalyzeMerge(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.Protection.AllowMerge = true
+	p := newReadOnlyTestInstance(t, config, func(t *testing.T, p *pgmcp.PostgresMcp) {
+		setupTable(t, p, "CREATE TABLE ro_ea_merge_t (id int PRIMARY KEY, name text)")
+		setupTable(t, p, "CREATE TABLE ro_ea_merge_s (id int PRIMARY KEY, name text)")
+		setupTable(t, p, "INSERT INTO ro_ea_merge_t (id, name) VALUES (1, 'Alice')")
+		setupTable(t, p, "INSERT INTO ro_ea_merge_s (id, name) VALUES (1, 'Bob')")
+	})
+
+	output := p.Query(context.Background(), pgmcp.QueryInput{
+		SQL: "EXPLAIN ANALYZE MERGE INTO ro_ea_merge_t t USING ro_ea_merge_s s ON t.id = s.id WHEN MATCHED THEN UPDATE SET name = s.name",
+	})
+	if output.Error == "" {
+		t.Fatal("expected error for EXPLAIN ANALYZE MERGE in read-only mode")
+	}
+	if !strings.Contains(output.Error, "read-only transaction") {
+		t.Fatalf("expected read-only transaction error, got: %s", output.Error)
+	}
+}
+
+// --- Read-Only Mode: EXPLAIN ANALYZE SELECT Works ---
+
+func TestQuery_ReadOnlyAllowsExplainAnalyzeSelect(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	p := newReadOnlyTestInstance(t, config, func(t *testing.T, p *pgmcp.PostgresMcp) {
+		setupTable(t, p, "CREATE TABLE ro_ea_select (id serial PRIMARY KEY, name text)")
+		setupTable(t, p, "INSERT INTO ro_ea_select (name) VALUES ('Alice')")
+	})
+
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "EXPLAIN ANALYZE SELECT * FROM ro_ea_select"})
+	if output.Error != "" {
+		t.Fatalf("EXPLAIN ANALYZE SELECT should work in read-only mode: %s", output.Error)
+	}
+}
+
+// --- Read-Only Mode: SELECT Confirms No Side Effects ---
+
+func TestQuery_ReadOnlySelectVerifiesData(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	p := newReadOnlyTestInstance(t, config, func(t *testing.T, p *pgmcp.PostgresMcp) {
+		setupTable(t, p, "CREATE TABLE ro_verify (id serial PRIMARY KEY, name text)")
+		setupTable(t, p, "INSERT INTO ro_verify (name) VALUES ('Alice'), ('Bob')")
+	})
+
+	// SELECT should return existing data
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "SELECT name FROM ro_verify ORDER BY id"})
+	if output.Error != "" {
+		t.Fatalf("unexpected error: %s", output.Error)
+	}
+	if len(output.Rows) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(output.Rows))
+	}
+	if output.Rows[0]["name"] != "Alice" {
+		t.Fatalf("expected Alice, got %v", output.Rows[0]["name"])
+	}
+	if output.Rows[1]["name"] != "Bob" {
+		t.Fatalf("expected Bob, got %v", output.Rows[1]["name"])
+	}
+}
+
 func TestQuery_Timezone(t *testing.T) {
 	t.Parallel()
 	config := defaultConfig()

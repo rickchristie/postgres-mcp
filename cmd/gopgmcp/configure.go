@@ -12,5 +12,6 @@ func runConfigure() error {
 	configPath := fs.String("config", ".gopgmcp/config.json", "Path to configuration file")
 	fs.Parse(os.Args[2:])
 
+	printBanner(os.Stderr, isTTY(os.Stderr.Fd()))
 	return configure.Run(*configPath)
 }

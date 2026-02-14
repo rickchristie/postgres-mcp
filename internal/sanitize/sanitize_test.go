@@ -273,3 +273,25 @@ func TestNewSanitizerErrorsOnInvalidRegex(t *testing.T) {
 		t.Fatalf("expected error to contain the invalid pattern, got: %s", err)
 	}
 }
+
+func TestHasRules_WithRules(t *testing.T) {
+	t.Parallel()
+	s, err := NewSanitizer([]Rule{phoneRule})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !s.HasRules() {
+		t.Fatal("expected HasRules to return true when rules are configured")
+	}
+}
+
+func TestHasRules_Empty(t *testing.T) {
+	t.Parallel()
+	s, err := NewSanitizer(nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if s.HasRules() {
+		t.Fatal("expected HasRules to return false when no rules are configured")
+	}
+}

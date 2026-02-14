@@ -35,7 +35,7 @@ func TestBeforeQuery_Accept(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	result, err := r.RunBeforeQuery(context.Background(), "SELECT 1")
+	result, _, err := r.RunBeforeQuery(context.Background(), "SELECT 1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -56,7 +56,7 @@ func TestBeforeQuery_Reject(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	_, err = r.RunBeforeQuery(context.Background(), "SELECT 1")
+	_, _, err = r.RunBeforeQuery(context.Background(), "SELECT 1")
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -77,7 +77,7 @@ func TestBeforeQuery_ModifyQuery(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	result, err := r.RunBeforeQuery(context.Background(), "SELECT 1")
+	result, _, err := r.RunBeforeQuery(context.Background(), "SELECT 1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestBeforeQuery_PatternNoMatch(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	result, err := r.RunBeforeQuery(context.Background(), "SELECT 1")
+	result, _, err := r.RunBeforeQuery(context.Background(), "SELECT 1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -120,7 +120,7 @@ func TestBeforeQuery_Chaining(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	result, err := r.RunBeforeQuery(context.Background(), "SELECT 1")
+	result, _, err := r.RunBeforeQuery(context.Background(), "SELECT 1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -143,7 +143,7 @@ func TestBeforeQuery_ChainPatternReEval(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	_, err = r.RunBeforeQuery(context.Background(), "SELECT 1")
+	_, _, err = r.RunBeforeQuery(context.Background(), "SELECT 1")
 	if err == nil {
 		t.Fatal("expected error from second hook matching modified query")
 	}
@@ -164,7 +164,7 @@ func TestBeforeQuery_Timeout(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	_, err = r.RunBeforeQuery(context.Background(), "SELECT 1")
+	_, _, err = r.RunBeforeQuery(context.Background(), "SELECT 1")
 	if err == nil {
 		t.Fatal("expected timeout error")
 	}
@@ -185,7 +185,7 @@ func TestBeforeQuery_Crash(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	_, err = r.RunBeforeQuery(context.Background(), "SELECT 1")
+	_, _, err = r.RunBeforeQuery(context.Background(), "SELECT 1")
 	if err == nil {
 		t.Fatal("expected crash error")
 	}
@@ -206,7 +206,7 @@ func TestBeforeQuery_UnparseableResponse(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	_, err = r.RunBeforeQuery(context.Background(), "SELECT 1")
+	_, _, err = r.RunBeforeQuery(context.Background(), "SELECT 1")
 	if err == nil {
 		t.Fatal("expected unparseable response error")
 	}
@@ -229,7 +229,7 @@ func TestAfterQuery_Accept(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	result, err := r.RunAfterQuery(context.Background(), `{"columns":["a"],"rows":[]}`)
+	result, _, err := r.RunAfterQuery(context.Background(), `{"columns":["a"],"rows":[]}`)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -250,7 +250,7 @@ func TestAfterQuery_Reject(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	_, err = r.RunAfterQuery(context.Background(), `{"columns":["a"],"rows":[]}`)
+	_, _, err = r.RunAfterQuery(context.Background(), `{"columns":["a"],"rows":[]}`)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -271,7 +271,7 @@ func TestAfterQuery_ModifyResult(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	result, err := r.RunAfterQuery(context.Background(), `{"columns":["a"],"rows":[]}`)
+	result, _, err := r.RunAfterQuery(context.Background(), `{"columns":["a"],"rows":[]}`)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -293,7 +293,7 @@ func TestAfterQuery_Chaining(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	result, err := r.RunAfterQuery(context.Background(), `{"columns":["a"],"rows":[]}`)
+	result, _, err := r.RunAfterQuery(context.Background(), `{"columns":["a"],"rows":[]}`)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -314,7 +314,7 @@ func TestAfterQuery_Timeout(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	_, err = r.RunAfterQuery(context.Background(), `{"columns":["a"],"rows":[]}`)
+	_, _, err = r.RunAfterQuery(context.Background(), `{"columns":["a"],"rows":[]}`)
 	if err == nil {
 		t.Fatal("expected timeout error")
 	}
@@ -335,7 +335,7 @@ func TestAfterQuery_Crash(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	_, err = r.RunAfterQuery(context.Background(), `{"columns":["a"],"rows":[]}`)
+	_, _, err = r.RunAfterQuery(context.Background(), `{"columns":["a"],"rows":[]}`)
 	if err == nil {
 		t.Fatal("expected crash error")
 	}
@@ -356,7 +356,7 @@ func TestAfterQuery_UnparseableResponse(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	_, err = r.RunAfterQuery(context.Background(), `{"columns":["a"],"rows":[]}`)
+	_, _, err = r.RunAfterQuery(context.Background(), `{"columns":["a"],"rows":[]}`)
 	if err == nil {
 		t.Fatal("expected unparseable response error")
 	}
@@ -379,7 +379,7 @@ func TestHookStdinInput(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	result, err := r.RunBeforeQuery(context.Background(), "SELECT * FROM users WHERE id = 42")
+	result, _, err := r.RunBeforeQuery(context.Background(), "SELECT * FROM users WHERE id = 42")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -400,7 +400,7 @@ func TestHookWithArgs(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	result, err := r.RunBeforeQuery(context.Background(), "SELECT 1")
+	result, _, err := r.RunBeforeQuery(context.Background(), "SELECT 1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -421,7 +421,7 @@ func TestHookWithEmptyArgs(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	result, err := r.RunBeforeQuery(context.Background(), "SELECT 1")
+	result, _, err := r.RunBeforeQuery(context.Background(), "SELECT 1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -442,7 +442,7 @@ func TestHookDefaultTimeout(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	_, err = r.RunBeforeQuery(context.Background(), "SELECT 1")
+	_, _, err = r.RunBeforeQuery(context.Background(), "SELECT 1")
 	if err == nil {
 		t.Fatal("expected timeout error (default timeout)")
 	}
@@ -464,7 +464,7 @@ func TestHookPerHookTimeoutOverridesDefault(t *testing.T) {
 	}
 
 	start := time.Now()
-	_, err = r.RunBeforeQuery(context.Background(), "SELECT 1")
+	_, _, err = r.RunBeforeQuery(context.Background(), "SELECT 1")
 	elapsed := time.Since(start)
 
 	if err == nil {

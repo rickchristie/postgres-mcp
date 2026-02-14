@@ -24,6 +24,11 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
+	case "doctor":
+		if err := runDoctor(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
 	case "--version", "-v", "version":
 		fmt.Printf("gopgmcp %s\n", meta.Version)
 	case "--help", "-h", "help":
@@ -41,6 +46,7 @@ func printUsage() {
 	fmt.Println("Usage:")
 	fmt.Println("  gopgmcp serve       Start the MCP server")
 	fmt.Println("  gopgmcp configure   Run interactive configuration wizard")
+	fmt.Println("  gopgmcp doctor      Validate config and show agent connection snippets")
 	fmt.Println("  gopgmcp --version   Show version")
 	fmt.Println("  gopgmcp --help      Show this help message")
 }
