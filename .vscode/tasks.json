@@ -55,6 +55,21 @@
         "close": true
       },
       "problemMatcher": ["$go"]
+    },
+    {
+      "label": "Release",
+      "type": "shell",
+      "command": "bash",
+      "args": ["scripts/release.sh"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "focus": true
+      },
+      "problemMatcher": []
     }
   ]
 }
