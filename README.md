@@ -778,6 +778,9 @@ flowchart TD
     P --> Q[Apply error prompts if error]
     Q --> R[Return QueryOutput]
 
+    N --> S[Release semaphore]
+    R --> S
+
     style A fill:#2d333b,stroke:#56d4dd,color:#c9d1d9
     style B fill:#2d333b,stroke:#56d4dd,color:#c9d1d9
     style C fill:#2d333b,stroke:#56d4dd,color:#c9d1d9
@@ -796,6 +799,7 @@ flowchart TD
     style P fill:#2d333b,stroke:#56d4dd,color:#c9d1d9
     style Q fill:#2d333b,stroke:#56d4dd,color:#c9d1d9
     style R fill:#2d333b,stroke:#56d4dd,color:#c9d1d9
+    style S fill:#2d333b,stroke:#56d4dd,color:#c9d1d9
 ```
 
 Read-only statements (SELECT, EXPLAIN, SHOW, SET) are rolled back immediately after collecting results. Write statements (INSERT, UPDATE, DELETE, etc.) are committed only after AfterQuery hooks approve. AfterQuery hooks run for all queries — for read-only queries the transaction is already rolled back, so hooks can inspect results but cannot affect the transaction.
