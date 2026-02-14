@@ -548,6 +548,51 @@ func TestLoadConfigValidation_GoHooksOnlyNoCmd(t *testing.T) {
 	})
 }
 
+func TestLoadConfigValidation_InvalidMaxConnLifetime(t *testing.T) {
+	t.Parallel()
+	config := validConfig()
+	config.Pool.MaxConnLifetime = "not-a-duration"
+
+	expectPanic(t, "pool.max_conn_lifetime", func() {
+		pgmcp.New(context.Background(), dummyConnString, config, configTestLogger())
+	})
+}
+
+func TestLoadConfigValidation_InvalidMaxConnIdleTime(t *testing.T) {
+	t.Parallel()
+	config := validConfig()
+	config.Pool.MaxConnIdleTime = "not-a-duration"
+
+	expectPanic(t, "pool.max_conn_idle_time", func() {
+		pgmcp.New(context.Background(), dummyConnString, config, configTestLogger())
+	})
+}
+
+func TestLoadConfigValidation_InvalidHealthCheckPeriod(t *testing.T) {
+	t.Parallel()
+	config := validConfig()
+	config.Pool.HealthCheckPeriod = "not-a-duration"
+
+	expectPanic(t, "pool.health_check_period", func() {
+		pgmcp.New(context.Background(), dummyConnString, config, configTestLogger())
+	})
+}
+
+func TestLoadConfig_ValidPoolDurations(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.Pool.MaxConnLifetime = "1h"
+	config.Pool.MaxConnIdleTime = "5m"
+	config.Pool.HealthCheckPeriod = "1m"
+
+	connStr := acquireTestDB(t)
+	p, err := pgmcp.New(context.Background(), connStr, config, testLogger())
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	defer p.Close(context.Background())
+}
+
 // --- Minimal hook implementations for config tests ---
 
 type passthroughBeforeHookConfig struct{}

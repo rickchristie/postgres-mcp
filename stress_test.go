@@ -13,6 +13,7 @@ import (
 )
 
 func TestStress_ConcurrentQueries(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	p, _ := newTestInstance(t, config)
 
@@ -52,6 +53,7 @@ func TestStress_ConcurrentQueries(t *testing.T) {
 }
 
 func TestStress_SemaphoreLimit(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Pool.MaxConns = 3
 	p, _ := newTestInstance(t, config)
@@ -90,6 +92,7 @@ func TestStress_SemaphoreLimit(t *testing.T) {
 }
 
 func TestStress_LargeResultTruncation(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Protection.AllowDDL = true
 	config.Query.MaxResultLength = 1000
@@ -111,6 +114,7 @@ func TestStress_LargeResultTruncation(t *testing.T) {
 }
 
 func TestStress_ConcurrentHooks(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.DefaultHookTimeoutSeconds = 5
 	config.BeforeQueryHooks = []pgmcp.BeforeQueryHookEntry{
@@ -148,6 +152,7 @@ func TestStress_ConcurrentHooks(t *testing.T) {
 }
 
 func TestStress_MixedOperations(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Protection.AllowDDL = true
 	p, _ := newTestInstance(t, config)
@@ -193,6 +198,48 @@ func TestStress_MixedOperations(t *testing.T) {
 	if errCount.Load() > 0 {
 		t.Fatalf("%d errors in mixed operations", errCount.Load())
 	}
+}
+
+func TestStress_ConcurrentCommandHooks(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.Pool.MaxConns = 3
+	config.DefaultHookTimeoutSeconds = 5
+	hooks := pgmcp.ServerHooksConfig{
+		BeforeQuery: []pgmcp.HookEntry{
+			{Pattern: ".*", Command: hookScript("accept.sh")},
+		},
+		AfterQuery: []pgmcp.HookEntry{
+			{Pattern: ".*", Command: hookScript("accept.sh")},
+		},
+	}
+	p := newTestInstanceWithHooks(t, config, hooks)
+
+	const goroutines = 20
+	var wg sync.WaitGroup
+	var errCount atomic.Int64
+
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < 5; j++ {
+				output := p.Query(context.Background(), pgmcp.QueryInput{
+					SQL: fmt.Sprintf("SELECT %d AS id", id*5+j),
+				})
+				if output.Error != "" {
+					errCount.Add(1)
+					t.Errorf("goroutine %d iter %d: %s", id, j, output.Error)
+				}
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	if errCount.Load() > 0 {
+		t.Fatalf("%d errors in concurrent command hook queries", errCount.Load())
+	}
+	t.Logf("completed %d queries with command hooks (pool max_conns: %d)", goroutines*5, config.Pool.MaxConns)
 }
 
 // concurrentPassthroughBeforeHook is a thread-safe passthrough for stress testing.

@@ -13,6 +13,7 @@ import (
 // protection checker test expectations are correct.
 
 func TestExplainParse_DropTable(t *testing.T) {
+	t.Parallel()
 	// DROP is NOT an ExplainableStmt in PostgreSQL grammar.
 	// Expected: parse error.
 	_, err := pg_query.Parse("EXPLAIN DROP TABLE users")
@@ -23,6 +24,7 @@ func TestExplainParse_DropTable(t *testing.T) {
 }
 
 func TestExplainParse_AnalyzeDropTable(t *testing.T) {
+	t.Parallel()
 	// EXPLAIN ANALYZE DROP — same issue.
 	_, err := pg_query.Parse("EXPLAIN ANALYZE DROP TABLE users")
 	if err == nil {
@@ -32,6 +34,7 @@ func TestExplainParse_AnalyzeDropTable(t *testing.T) {
 }
 
 func TestExplainParse_Truncate(t *testing.T) {
+	t.Parallel()
 	// TRUNCATE is NOT an ExplainableStmt.
 	_, err := pg_query.Parse("EXPLAIN ANALYZE TRUNCATE users")
 	if err == nil {
@@ -41,6 +44,7 @@ func TestExplainParse_Truncate(t *testing.T) {
 }
 
 func TestExplainParse_DeleteWithoutWhere(t *testing.T) {
+	t.Parallel()
 	// DELETE IS an ExplainableStmt. Should parse successfully.
 	result, err := pg_query.Parse("EXPLAIN DELETE FROM users")
 	if err != nil {
@@ -63,6 +67,7 @@ func TestExplainParse_DeleteWithoutWhere(t *testing.T) {
 }
 
 func TestExplainParse_AnalyzeDeleteWithoutWhere(t *testing.T) {
+	t.Parallel()
 	// EXPLAIN ANALYZE DELETE — should parse and have ExplainStmt wrapping DeleteStmt.
 	result, err := pg_query.Parse("EXPLAIN ANALYZE DELETE FROM users")
 	if err != nil {
@@ -82,6 +87,7 @@ func TestExplainParse_AnalyzeDeleteWithoutWhere(t *testing.T) {
 }
 
 func TestExplainParse_UpdateWithoutWhere(t *testing.T) {
+	t.Parallel()
 	// UPDATE IS an ExplainableStmt.
 	result, err := pg_query.Parse("EXPLAIN ANALYZE UPDATE users SET active = false")
 	if err != nil {
@@ -101,6 +107,7 @@ func TestExplainParse_UpdateWithoutWhere(t *testing.T) {
 }
 
 func TestExplainParse_Select(t *testing.T) {
+	t.Parallel()
 	// SELECT IS an ExplainableStmt.
 	result, err := pg_query.Parse("EXPLAIN ANALYZE SELECT * FROM users")
 	if err != nil {
@@ -115,6 +122,7 @@ func TestExplainParse_Select(t *testing.T) {
 }
 
 func TestExplainParse_Insert(t *testing.T) {
+	t.Parallel()
 	// INSERT IS an ExplainableStmt.
 	result, err := pg_query.Parse("EXPLAIN ANALYZE INSERT INTO users (name) VALUES ('test')")
 	if err != nil {
@@ -129,6 +137,7 @@ func TestExplainParse_Insert(t *testing.T) {
 }
 
 func TestExplainParse_CTEWithDelete(t *testing.T) {
+	t.Parallel()
 	// CTE with DELETE inside EXPLAIN — should parse, inner is SelectStmt with WithClause.
 	sql := "EXPLAIN ANALYZE WITH d AS (DELETE FROM users RETURNING *) SELECT * FROM d"
 	result, err := pg_query.Parse(sql)
@@ -166,6 +175,7 @@ func TestExplainParse_CTEWithDelete(t *testing.T) {
 
 // Test MERGE statement parsing (PostgreSQL 15+)
 func TestMergeParse_Basic(t *testing.T) {
+	t.Parallel()
 	sql := `MERGE INTO target t
 		USING source s ON t.id = s.id
 		WHEN MATCHED THEN UPDATE SET name = s.name
@@ -187,6 +197,7 @@ func TestMergeParse_Basic(t *testing.T) {
 }
 
 func TestMergeParse_WithDelete(t *testing.T) {
+	t.Parallel()
 	sql := `MERGE INTO target t
 		USING source s ON t.id = s.id
 		WHEN MATCHED THEN DELETE`
@@ -203,6 +214,7 @@ func TestMergeParse_WithDelete(t *testing.T) {
 }
 
 func TestExplainParse_Merge(t *testing.T) {
+	t.Parallel()
 	// MERGE is an ExplainableStmt in PostgreSQL 15+.
 	sql := `EXPLAIN ANALYZE MERGE INTO target t
 		USING source s ON t.id = s.id
@@ -227,6 +239,7 @@ func TestExplainParse_Merge(t *testing.T) {
 
 // Test privilege-related statements parsing
 func TestGrantParse(t *testing.T) {
+	t.Parallel()
 	sql := "GRANT SELECT ON users TO readonly_user"
 	result, err := pg_query.Parse(sql)
 	if err != nil {
@@ -241,6 +254,7 @@ func TestGrantParse(t *testing.T) {
 }
 
 func TestRevokeParse(t *testing.T) {
+	t.Parallel()
 	sql := "REVOKE SELECT ON users FROM readonly_user"
 	result, err := pg_query.Parse(sql)
 	if err != nil {
@@ -256,6 +270,7 @@ func TestRevokeParse(t *testing.T) {
 }
 
 func TestGrantRoleParse(t *testing.T) {
+	t.Parallel()
 	sql := "GRANT admin TO bob"
 	result, err := pg_query.Parse(sql)
 	if err != nil {
@@ -270,6 +285,7 @@ func TestGrantRoleParse(t *testing.T) {
 }
 
 func TestRevokeRoleParse(t *testing.T) {
+	t.Parallel()
 	sql := "REVOKE admin FROM bob"
 	result, err := pg_query.Parse(sql)
 	if err != nil {
@@ -284,6 +300,7 @@ func TestRevokeRoleParse(t *testing.T) {
 }
 
 func TestCreateRoleParse(t *testing.T) {
+	t.Parallel()
 	sql := "CREATE ROLE testrole WITH LOGIN PASSWORD 'secret'"
 	result, err := pg_query.Parse(sql)
 	if err != nil {
@@ -298,6 +315,7 @@ func TestCreateRoleParse(t *testing.T) {
 }
 
 func TestCreateUserParse(t *testing.T) {
+	t.Parallel()
 	// CREATE USER is syntactic sugar for CREATE ROLE ... LOGIN
 	sql := "CREATE USER testuser WITH PASSWORD 'secret'"
 	result, err := pg_query.Parse(sql)
@@ -313,6 +331,7 @@ func TestCreateUserParse(t *testing.T) {
 }
 
 func TestAlterRoleParse(t *testing.T) {
+	t.Parallel()
 	sql := "ALTER ROLE testrole WITH SUPERUSER"
 	result, err := pg_query.Parse(sql)
 	if err != nil {
@@ -327,6 +346,7 @@ func TestAlterRoleParse(t *testing.T) {
 }
 
 func TestDropRoleParse(t *testing.T) {
+	t.Parallel()
 	sql := "DROP ROLE testrole"
 	result, err := pg_query.Parse(sql)
 	if err != nil {
@@ -341,6 +361,7 @@ func TestDropRoleParse(t *testing.T) {
 }
 
 func TestDropUserParse(t *testing.T) {
+	t.Parallel()
 	// DROP USER is syntactic sugar for DROP ROLE
 	sql := "DROP USER testuser"
 	result, err := pg_query.Parse(sql)
@@ -357,6 +378,7 @@ func TestDropUserParse(t *testing.T) {
 
 // Test COPY TO parsing to verify AST node type
 func TestCopyToParse(t *testing.T) {
+	t.Parallel()
 	sql := "COPY users TO STDOUT"
 	result, err := pg_query.Parse(sql)
 	if err != nil {
@@ -374,6 +396,7 @@ func TestCopyToParse(t *testing.T) {
 }
 
 func TestCopyToWithQuery(t *testing.T) {
+	t.Parallel()
 	sql := "COPY (SELECT * FROM users) TO STDOUT"
 	result, err := pg_query.Parse(sql)
 	if err != nil {

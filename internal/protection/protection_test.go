@@ -1265,6 +1265,18 @@ func TestDDL_DropNotAffectedByDDL(t *testing.T) {
 	assertBlocked(t, c, "DROP TABLE users", "DROP statements are not allowed")
 }
 
+func TestDDL_CreateMaterializedView(t *testing.T) {
+	t.Parallel()
+	c := NewChecker(defaultConfig())
+	assertBlocked(t, c, "CREATE MATERIALIZED VIEW mv AS SELECT COUNT(*) FROM users", "CREATE TABLE AS / CREATE MATERIALIZED VIEW is not allowed: DDL operations are blocked")
+}
+
+func TestDDL_CreateMaterializedView_Allowed(t *testing.T) {
+	t.Parallel()
+	c := NewChecker(Config{AllowDDL: true})
+	assertAllowed(t, c, "CREATE MATERIALIZED VIEW mv AS SELECT COUNT(*) FROM users")
+}
+
 // --- DISCARD Protection ---
 
 func TestDiscard_All(t *testing.T) {

@@ -36,13 +36,26 @@ func TestDescribeTable_Columns(t *testing.T) {
 			if !col.IsPrimaryKey {
 				t.Error("expected id to be primary key")
 			}
+			if col.Type != "integer" {
+				t.Errorf("expected id type 'integer', got %q", col.Type)
+			}
 		case "name":
 			if col.Nullable {
 				t.Error("expected name to be NOT NULL")
 			}
+			if !strings.Contains(col.Type, "character varying") {
+				t.Errorf("expected name type to contain 'character varying', got %q", col.Type)
+			}
+		case "email":
+			if col.Type != "text" {
+				t.Errorf("expected email type 'text', got %q", col.Type)
+			}
 		case "age":
 			if col.Default == "" {
 				t.Error("expected age to have a default")
+			}
+			if col.Type != "integer" {
+				t.Errorf("expected age type 'integer', got %q", col.Type)
 			}
 		}
 	}
@@ -73,6 +86,12 @@ func TestDescribeTable_PrimaryKey(t *testing.T) {
 	for _, con := range output.Constraints {
 		if con.Type == "PRIMARY KEY" {
 			foundPK = true
+			if con.Name == "" {
+				t.Error("expected PRIMARY KEY constraint name to be non-empty")
+			}
+			if con.Definition == "" {
+				t.Error("expected PRIMARY KEY constraint definition to be non-empty")
+			}
 			break
 		}
 	}
@@ -96,17 +115,29 @@ func TestDescribeTable_Indexes(t *testing.T) {
 	}
 
 	found := false
+	foundPKIndex := false
 	for _, idx := range output.Indexes {
 		if idx.Name == "idx_email" {
 			found = true
 			if idx.IsUnique {
 				t.Error("expected non-unique index")
 			}
-			break
+			if idx.Definition == "" {
+				t.Error("expected idx_email definition to be non-empty")
+			}
+			if idx.IsPrimary {
+				t.Error("expected idx_email to not be primary")
+			}
+		}
+		if idx.IsPrimary {
+			foundPKIndex = true
 		}
 	}
 	if !found {
 		t.Error("expected idx_email in indexes")
+	}
+	if !foundPKIndex {
+		t.Error("expected a primary key index in indexes")
 	}
 }
 
@@ -134,6 +165,15 @@ func TestDescribeTable_ForeignKeys(t *testing.T) {
 	if fk.OnDelete != "CASCADE" {
 		t.Fatalf("expected ON DELETE CASCADE, got %q", fk.OnDelete)
 	}
+	if fk.Columns != "author_id" {
+		t.Fatalf("expected fk columns 'author_id', got %q", fk.Columns)
+	}
+	if fk.ReferencedColumns != "id" {
+		t.Fatalf("expected fk referenced columns 'id', got %q", fk.ReferencedColumns)
+	}
+	if fk.OnUpdate != "NO ACTION" {
+		t.Fatalf("expected ON UPDATE 'NO ACTION', got %q", fk.OnUpdate)
+	}
 }
 
 func TestDescribeTable_UniqueConstraint(t *testing.T) {
@@ -153,6 +193,12 @@ func TestDescribeTable_UniqueConstraint(t *testing.T) {
 	for _, con := range output.Constraints {
 		if con.Type == "UNIQUE" {
 			foundUnique = true
+			if con.Name == "" {
+				t.Error("expected UNIQUE constraint name to be non-empty")
+			}
+			if con.Definition == "" {
+				t.Error("expected UNIQUE constraint definition to be non-empty")
+			}
 			break
 		}
 	}
@@ -178,6 +224,12 @@ func TestDescribeTable_CheckConstraint(t *testing.T) {
 	for _, con := range output.Constraints {
 		if con.Type == "CHECK" {
 			foundCheck = true
+			if con.Name == "" {
+				t.Error("expected CHECK constraint name to be non-empty")
+			}
+			if con.Definition == "" {
+				t.Error("expected CHECK constraint definition to be non-empty")
+			}
 			break
 		}
 	}
@@ -604,4 +656,91 @@ func TestDescribeTable_SemaphoreContention(t *testing.T) {
 	}
 
 	<-done
+}
+
+func TestDescribeTable_ExclusionConstraint(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.Protection.AllowDDL = true
+	config.Protection.AllowCreateExtension = true
+	p, _ := newTestInstance(t, config)
+
+	// Try to create btree_gist extension — skip if not available
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "CREATE EXTENSION IF NOT EXISTS btree_gist"})
+	if output.Error != "" {
+		t.Skipf("btree_gist extension not available: %s", output.Error)
+	}
+
+	setupTable(t, p, "CREATE TABLE reservations (id serial PRIMARY KEY, room integer NOT NULL, during tsrange NOT NULL, EXCLUDE USING gist (room WITH =, during WITH &&))")
+
+	descOutput, err := p.DescribeTable(context.Background(), pgmcp.DescribeTableInput{Table: "reservations"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	foundExclusion := false
+	for _, con := range descOutput.Constraints {
+		if con.Type == "EXCLUSION" {
+			foundExclusion = true
+			if con.Name == "" {
+				t.Error("expected exclusion constraint name to be non-empty")
+			}
+			if con.Definition == "" {
+				t.Error("expected exclusion constraint definition to be non-empty")
+			}
+			break
+		}
+	}
+	if !foundExclusion {
+		t.Error("expected EXCLUSION constraint in list")
+	}
+}
+
+func TestDescribeTable_ErrorField(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.Protection.AllowDDL = true
+	p, _ := newTestInstance(t, config)
+
+	setupTable(t, p, "CREATE TABLE error_field_table (id serial PRIMARY KEY, name text)")
+
+	output, err := p.DescribeTable(context.Background(), pgmcp.DescribeTableInput{Table: "error_field_table"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if output.Error != "" {
+		t.Fatalf("expected Error field to be empty on successful describe, got %q", output.Error)
+	}
+}
+
+func TestDescribeTable_ForeignKeyConstraintInConstraintsList(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.Protection.AllowDDL = true
+	p, _ := newTestInstance(t, config)
+
+	setupTable(t, p, "CREATE TABLE fk_con_authors (id serial PRIMARY KEY, name text)")
+	setupTable(t, p, "CREATE TABLE fk_con_books (id serial PRIMARY KEY, author_id integer REFERENCES fk_con_authors(id) ON DELETE CASCADE)")
+
+	output, err := p.DescribeTable(context.Background(), pgmcp.DescribeTableInput{Table: "fk_con_books"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	foundFK := false
+	for _, con := range output.Constraints {
+		if con.Type == "FOREIGN KEY" {
+			foundFK = true
+			if con.Name == "" {
+				t.Error("expected FOREIGN KEY constraint name to be non-empty")
+			}
+			if con.Definition == "" {
+				t.Error("expected FOREIGN KEY constraint definition to be non-empty")
+			}
+			break
+		}
+	}
+	if !foundFK {
+		t.Error("expected FOREIGN KEY constraint in constraints list")
+	}
 }

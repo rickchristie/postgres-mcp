@@ -29,13 +29,17 @@ func TestListTables_Basic(t *testing.T) {
 		t.Fatalf("expected at least 3 tables, got %d", len(output.Tables))
 	}
 
-	names := map[string]bool{}
+	nameToType := map[string]string{}
 	for _, tbl := range output.Tables {
-		names[tbl.Name] = true
+		nameToType[tbl.Name] = tbl.Type
 	}
 	for _, expected := range []string{"users", "posts", "comments"} {
-		if !names[expected] {
+		typ, ok := nameToType[expected]
+		if !ok {
 			t.Fatalf("expected table %q in list", expected)
+		}
+		if typ != "table" {
+			t.Fatalf("expected table %q to have Type \"table\", got %q", expected, typ)
 		}
 	}
 }
@@ -419,4 +423,45 @@ func TestListTables_SemaphoreContention(t *testing.T) {
 	}
 
 	<-done
+}
+
+func TestListTables_InternalTimeout(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.Protection.AllowDDL = true
+	config.Query.ListTablesTimeoutSeconds = 1
+	p, connStr := newTestInstance(t, config)
+
+	setupTable(t, p, "CREATE TABLE lt_timeout_table (id serial PRIMARY KEY)")
+
+	// Hold an ACCESS EXCLUSIVE lock on pg_class from a separate connection.
+	// This blocks the ListTables query which reads pg_class.
+	ctx := context.Background()
+	lockConn, err := pgx.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("failed to connect for lock: %v", err)
+	}
+	t.Cleanup(func() {
+		lockConn.Exec(ctx, "ROLLBACK")
+		lockConn.Close(ctx)
+	})
+
+	_, err = lockConn.Exec(ctx, "BEGIN")
+	if err != nil {
+		t.Fatalf("failed to begin lock transaction: %v", err)
+	}
+	_, err = lockConn.Exec(ctx, "LOCK TABLE pg_catalog.pg_class IN ACCESS EXCLUSIVE MODE")
+	if err != nil {
+		t.Fatalf("failed to lock pg_class: %v", err)
+	}
+
+	// ListTables should block on the lock and timeout after 1s via ListTablesTimeoutSeconds
+	_, listErr := p.ListTables(ctx, pgmcp.ListTablesInput{})
+	if listErr == nil {
+		t.Fatal("expected timeout error from ListTablesTimeoutSeconds")
+	}
+	errMsg := listErr.Error()
+	if !strings.Contains(errMsg, "context deadline exceeded") && !strings.Contains(errMsg, "canceling statement") {
+		t.Fatalf("expected deadline exceeded or canceling statement error, got %q", errMsg)
+	}
 }

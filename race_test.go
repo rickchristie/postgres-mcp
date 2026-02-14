@@ -12,6 +12,7 @@ import (
 )
 
 func TestRace_ConcurrentSanitization(t *testing.T) {
+	t.Parallel()
 	s, err := sanitize.NewSanitizer([]sanitize.Rule{
 		{Pattern: `\d{3}-\d{4}`, Replacement: "***-****"},
 		{Pattern: `\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b`, Replacement: "[REDACTED]"},
@@ -39,6 +40,7 @@ func TestRace_ConcurrentSanitization(t *testing.T) {
 }
 
 func TestRace_ConcurrentProtectionCheck(t *testing.T) {
+	t.Parallel()
 	c := protection.NewChecker(protection.Config{})
 
 	queries := []string{
@@ -67,6 +69,7 @@ func TestRace_ConcurrentProtectionCheck(t *testing.T) {
 }
 
 func TestRace_ConcurrentErrorPrompt(t *testing.T) {
+	t.Parallel()
 	m, err := errprompt.NewMatcher([]errprompt.Rule{
 		{Pattern: `permission denied`, Message: "You don't have permission."},
 		{Pattern: `syntax error`, Message: "Check your SQL syntax."},
@@ -100,6 +103,7 @@ func TestRace_ConcurrentErrorPrompt(t *testing.T) {
 }
 
 func TestRace_ConcurrentTimeout(t *testing.T) {
+	t.Parallel()
 	m, err := timeout.NewManager(timeout.Config{
 		DefaultTimeout: 30 * time.Second,
 		Rules: []timeout.Rule{

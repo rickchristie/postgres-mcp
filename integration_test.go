@@ -429,6 +429,12 @@ func TestQuery_MaxResultLength(t *testing.T) {
 	if !strings.Contains(output.Error, "[truncated]") {
 		t.Fatalf("expected truncation marker, got %q", output.Error)
 	}
+	if output.Rows != nil {
+		t.Fatalf("expected Rows to be nil after truncation, got %v", output.Rows)
+	}
+	if !strings.HasPrefix(output.Error, "[") {
+		t.Fatalf("expected Error to start with '[' (partial JSON array), got %q", output.Error)
+	}
 }
 
 func TestQuery_ReadOnlyMode(t *testing.T) {
@@ -2050,5 +2056,47 @@ func TestLoadConfigDefaults_MaxSQLLength(t *testing.T) {
 	}
 	if len(output.Rows) != 1 {
 		t.Fatalf("expected 1 row, got %d", len(output.Rows))
+	}
+}
+
+func TestClose_SubsequentOperationsFail(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	connStr := acquireTestDB(t)
+	config := defaultConfig()
+
+	p, err := pgmcp.New(ctx, connStr, config, testLogger())
+	if err != nil {
+		t.Fatalf("failed to create pgmcp instance: %v", err)
+	}
+
+	// Verify the instance works before closing.
+	output := p.Query(ctx, pgmcp.QueryInput{SQL: "SELECT 1 AS num"})
+	if output.Error != "" {
+		t.Fatalf("unexpected error before close: %s", output.Error)
+	}
+	if len(output.Rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(output.Rows))
+	}
+
+	// Close the instance.
+	p.Close(ctx)
+
+	// Query should return an error in output.Error (pool is closed).
+	output = p.Query(ctx, pgmcp.QueryInput{SQL: "SELECT 1 AS num"})
+	if output.Error == "" {
+		t.Fatalf("expected error after close, got none")
+	}
+
+	// ListTables should return a Go error.
+	_, err = p.ListTables(ctx, pgmcp.ListTablesInput{})
+	if err == nil {
+		t.Fatalf("expected error from ListTables after close, got nil")
+	}
+
+	// DescribeTable should return a Go error.
+	_, err = p.DescribeTable(ctx, pgmcp.DescribeTableInput{Table: "nonexistent"})
+	if err == nil {
+		t.Fatalf("expected error from DescribeTable after close, got nil")
 	}
 }

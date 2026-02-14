@@ -604,3 +604,73 @@ func TestNewRunnerErrorsOnInvalidRegex(t *testing.T) {
 		t.Fatalf("expected error to contain the invalid pattern, got: %s", err)
 	}
 }
+
+func TestAfterQuery_PatternNoMatch(t *testing.T) {
+	t.Parallel()
+	r, err := NewRunner(Config{
+		DefaultTimeout: 5 * time.Second,
+		AfterQuery: []HookEntry{
+			{Pattern: "NEVER_MATCH_THIS_PATTERN", Command: hookScript("reject.sh")},
+		},
+	}, testLogger())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	result, _, err := r.RunAfterQuery(context.Background(), `{"columns":["a"],"rows":[{"a":1}]}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != `{"columns":["a"],"rows":[{"a":1}]}` {
+		t.Fatalf("expected result unchanged when pattern doesn't match, got %q", result)
+	}
+}
+
+func TestAfterQuery_ChainPatternReEval(t *testing.T) {
+	t.Parallel()
+	r, err := NewRunner(Config{
+		DefaultTimeout: 5 * time.Second,
+		AfterQuery: []HookEntry{
+			{Pattern: ".*", Command: hookScript("modify_result.sh")},
+			{Pattern: "modified", Command: hookScript("reject.sh")},
+		},
+	}, testLogger())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Original input doesn't contain "modified", but after first hook modifies it,
+	// the second hook's pattern "modified" should match the modified result
+	_, _, err = r.RunAfterQuery(context.Background(), `{"columns":["a"],"rows":[]}`)
+	if err == nil {
+		t.Fatal("expected error from second hook matching modified result")
+	}
+	if !strings.Contains(err.Error(), "rejected by test hook") {
+		t.Fatalf("expected rejection from re-evaluated pattern match, got %q", err.Error())
+	}
+}
+
+func TestBeforeQuery_NoShellInjection(t *testing.T) {
+	t.Parallel()
+	r, err := NewRunner(Config{
+		DefaultTimeout: 5 * time.Second,
+		BeforeQuery: []HookEntry{
+			{Pattern: ".*", Command: hookScript("echo_stdin.sh")},
+		},
+	}, testLogger())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Shell metacharacters that would be dangerous if interpreted by a shell
+	shellInput := "SELECT * FROM users; $(rm -rf /); `whoami`; | cat /etc/passwd"
+	result, _, err := r.RunBeforeQuery(context.Background(), shellInput)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// The echo_stdin.sh script should return the input literally, proving no shell interpretation
+	expected := "STDIN: " + shellInput
+	if result != expected {
+		t.Fatalf("expected shell metacharacters to be treated as literals.\nexpected: %q\ngot:      %q", expected, result)
+	}
+}

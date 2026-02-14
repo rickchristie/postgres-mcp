@@ -31,6 +31,7 @@ func getFreePort(t *testing.T) int {
 // NOT register the MCP handler on the server's mux. This means the MCP
 // endpoint will return 404 unless you register the handler yourself.
 func TestStreamableHTTP_CustomServer_DoesNotRegisterHandler(t *testing.T) {
+	t.Parallel()
 	port := getFreePort(t)
 	addr := fmt.Sprintf(":%d", port)
 
@@ -96,6 +97,7 @@ func TestStreamableHTTP_CustomServer_DoesNotRegisterHandler(t *testing.T) {
 // manually register the StreamableHTTPServer as a handler on the mux before
 // calling Start(). This way both health check and MCP endpoint work.
 func TestStreamableHTTP_ManualRegistration_Works(t *testing.T) {
+	t.Parallel()
 	port := getFreePort(t)
 	addr := fmt.Sprintf(":%d", port)
 

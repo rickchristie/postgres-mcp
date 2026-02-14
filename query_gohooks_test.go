@@ -746,6 +746,114 @@ func TestQuery_GoAfterHook_SelectRollbacksBeforeHooks(t *testing.T) {
 	}
 }
 
+func TestQuery_GoAfterHook_TimeoutRollbacksInsert(t *testing.T) {
+	t.Parallel()
+	// Setup: create table with a non-hooked instance
+	setupConfig := defaultConfig()
+	setupConfig.Protection.AllowDDL = true
+	setupP, connStr := newTestInstance(t, setupConfig)
+	setupTable(t, setupP, "CREATE TABLE users_go_timeout_insert (id serial PRIMARY KEY, name text)")
+	setupP.Close(context.Background())
+
+	// Create instance with slow after-hook that will time out
+	config := defaultConfig()
+	config.DefaultHookTimeoutSeconds = 1
+	config.AfterQueryHooks = []pgmcp.AfterQueryHookEntry{
+		{Name: "slow_auditor", Hook: &slowAfterHook{sleepDuration: 10 * time.Second}},
+	}
+	ctx := context.Background()
+	p, err := pgmcp.New(ctx, connStr, config, testLogger())
+	if err != nil {
+		t.Fatalf("Failed to create PostgresMcp: %v", err)
+	}
+	defer p.Close(ctx)
+
+	output := p.Query(ctx, pgmcp.QueryInput{SQL: "INSERT INTO users_go_timeout_insert (name) VALUES ('timeout_row') RETURNING *"})
+	if output.Error == "" {
+		t.Fatal("expected hook timeout error")
+	}
+	if !strings.Contains(output.Error, "hook timed out") {
+		t.Fatalf("expected 'hook timed out' in error, got %q", output.Error)
+	}
+
+	// Verify the row was NOT inserted (rollback happened) using a non-hooked instance
+	verifyConfig := defaultConfig()
+	verifyP, err := pgmcp.New(ctx, connStr, verifyConfig, testLogger())
+	if err != nil {
+		t.Fatalf("Failed to create verify instance: %v", err)
+	}
+	defer verifyP.Close(ctx)
+
+	verifyOutput := verifyP.Query(ctx, pgmcp.QueryInput{SQL: "SELECT count(*) AS cnt FROM users_go_timeout_insert WHERE name = 'timeout_row'"})
+	if verifyOutput.Error != "" {
+		t.Fatalf("verification query failed: %s", verifyOutput.Error)
+	}
+	cnt := verifyOutput.Rows[0]["cnt"]
+	if cnt != int64(0) {
+		t.Fatalf("expected 0 rows (rollback), got %v (%T)", cnt, cnt)
+	}
+}
+
+func TestQuery_GoAfterHook_TimeoutRollbacksUpdate(t *testing.T) {
+	t.Parallel()
+	// Setup: create table and insert initial data with a non-hooked instance
+	setupConfig := defaultConfig()
+	setupConfig.Protection.AllowDDL = true
+	setupP, connStr := newTestInstance(t, setupConfig)
+	setupTable(t, setupP, "CREATE TABLE users_go_timeout_update (id serial PRIMARY KEY, name text)")
+	setupTable(t, setupP, "INSERT INTO users_go_timeout_update (name) VALUES ('original_name')")
+	setupP.Close(context.Background())
+
+	// Create instance with slow after-hook that will time out
+	config := defaultConfig()
+	config.DefaultHookTimeoutSeconds = 1
+	config.AfterQueryHooks = []pgmcp.AfterQueryHookEntry{
+		{Name: "slow_auditor", Hook: &slowAfterHook{sleepDuration: 10 * time.Second}},
+	}
+	ctx := context.Background()
+	p, err := pgmcp.New(ctx, connStr, config, testLogger())
+	if err != nil {
+		t.Fatalf("Failed to create PostgresMcp: %v", err)
+	}
+	defer p.Close(ctx)
+
+	output := p.Query(ctx, pgmcp.QueryInput{SQL: "UPDATE users_go_timeout_update SET name = 'updated_name' WHERE name = 'original_name' RETURNING *"})
+	if output.Error == "" {
+		t.Fatal("expected hook timeout error")
+	}
+	if !strings.Contains(output.Error, "hook timed out") {
+		t.Fatalf("expected 'hook timed out' in error, got %q", output.Error)
+	}
+
+	// Verify the update was NOT applied (rollback happened) using a non-hooked instance
+	verifyConfig := defaultConfig()
+	verifyP, err := pgmcp.New(ctx, connStr, verifyConfig, testLogger())
+	if err != nil {
+		t.Fatalf("Failed to create verify instance: %v", err)
+	}
+	defer verifyP.Close(ctx)
+
+	// The original row should still have the original name
+	verifyOutput := verifyP.Query(ctx, pgmcp.QueryInput{SQL: "SELECT count(*) AS cnt FROM users_go_timeout_update WHERE name = 'original_name'"})
+	if verifyOutput.Error != "" {
+		t.Fatalf("verification query failed: %s", verifyOutput.Error)
+	}
+	cnt := verifyOutput.Rows[0]["cnt"]
+	if cnt != int64(1) {
+		t.Fatalf("expected 1 row with original_name (rollback preserved it), got %v (%T)", cnt, cnt)
+	}
+
+	// No row should have the updated name
+	verifyOutput2 := verifyP.Query(ctx, pgmcp.QueryInput{SQL: "SELECT count(*) AS cnt FROM users_go_timeout_update WHERE name = 'updated_name'"})
+	if verifyOutput2.Error != "" {
+		t.Fatalf("verification query failed: %s", verifyOutput2.Error)
+	}
+	cnt2 := verifyOutput2.Rows[0]["cnt"]
+	if cnt2 != int64(0) {
+		t.Fatalf("expected 0 rows with updated_name (rollback), got %v (%T)", cnt2, cnt2)
+	}
+}
+
 func TestQuery_MaxSQLLength_RejectsBeforeHooks(t *testing.T) {
 	t.Parallel()
 	config := defaultConfig()

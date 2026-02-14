@@ -132,6 +132,7 @@ func (s *mcpTestServer) jsonRPC(t *testing.T, method string, params interface{})
 }
 
 func TestMCPServer_QueryTool(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Protection.AllowDDL = true
 	s := startMCPTestServer(t, config, "")
@@ -180,6 +181,7 @@ func TestMCPServer_QueryTool(t *testing.T) {
 }
 
 func TestMCPServer_ListTablesTool(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Protection.AllowDDL = true
 	s := startMCPTestServer(t, config, "")
@@ -212,6 +214,7 @@ func TestMCPServer_ListTablesTool(t *testing.T) {
 }
 
 func TestMCPServer_DescribeTableTool(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Protection.AllowDDL = true
 	s := startMCPTestServer(t, config, "")
@@ -243,6 +246,7 @@ func TestMCPServer_DescribeTableTool(t *testing.T) {
 }
 
 func TestMCPServer_HealthCheck(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	s := startMCPTestServer(t, config, "/health")
 
@@ -264,6 +268,7 @@ func TestMCPServer_HealthCheck(t *testing.T) {
 }
 
 func TestMCPServer_HealthCheckAndMCPCoexist(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	config.Protection.AllowDDL = true
 	s := startMCPTestServer(t, config, "/healthz")
@@ -295,6 +300,7 @@ func TestMCPServer_HealthCheckAndMCPCoexist(t *testing.T) {
 }
 
 func TestMCPServer_ToolsList(t *testing.T) {
+	t.Parallel()
 	config := defaultConfig()
 	s := startMCPTestServer(t, config, "")
 
