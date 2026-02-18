@@ -2804,6 +2804,108 @@ func keys(m map[string]interface{}) []string {
 	return ks
 }
 
+func TestQuery_TimeoutErrorPrompt(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.Query.DefaultTimeoutSeconds = 1
+	config.ErrorPrompts = []pgmcp.ErrorPromptRule{
+		{Pattern: "deadline exceeded", Message: "The query timed out. Try simplifying your query or adding an index."},
+		{Pattern: "canceling statement", Message: "The query was cancelled due to timeout. Try a simpler query."},
+	}
+	p, _ := newTestInstance(t, config)
+
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "SELECT pg_sleep(10)"})
+	if output.Error == "" {
+		t.Fatal("expected timeout error")
+	}
+	// The error should contain the original timeout message
+	if !strings.Contains(output.Error, "context deadline exceeded") && !strings.Contains(output.Error, "canceling statement") {
+		t.Fatalf("expected timeout error message, got %q", output.Error)
+	}
+	// The error should also contain the appended error prompt
+	if !strings.Contains(output.Error, "timed out") && !strings.Contains(output.Error, "cancelled due to timeout") {
+		t.Fatalf("expected error prompt appended to timeout error, got %q", output.Error)
+	}
+}
+
+func TestQuery_TimeoutMultipleErrorPrompts(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.Query.DefaultTimeoutSeconds = 1
+	// Both patterns should match since "canceling statement due to statement timeout" contains both
+	// or "context deadline exceeded" — we use a universal pattern that matches either error form
+	config.ErrorPrompts = []pgmcp.ErrorPromptRule{
+		{Pattern: "timeout|deadline", Message: "Hint 1: Query took too long."},
+		{Pattern: "cancel|deadline", Message: "Hint 2: Try adding LIMIT or an index."},
+	}
+	p, _ := newTestInstance(t, config)
+
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "SELECT pg_sleep(10)"})
+	if output.Error == "" {
+		t.Fatal("expected timeout error")
+	}
+	if !strings.Contains(output.Error, "Hint 1: Query took too long.") {
+		t.Fatalf("expected first error prompt appended, got %q", output.Error)
+	}
+	if !strings.Contains(output.Error, "Hint 2: Try adding LIMIT or an index.") {
+		t.Fatalf("expected second error prompt appended, got %q", output.Error)
+	}
+}
+
+func TestQuery_TimeoutAfterHookNotCalled(t *testing.T) {
+	t.Parallel()
+	// When the query itself times out, AfterQuery hooks should NOT run
+	// because handleError returns before we reach the hook step.
+	hook := &captureAfterHook{}
+	config := defaultConfig()
+	config.Query.DefaultTimeoutSeconds = 1
+	config.DefaultHookTimeoutSeconds = 5
+	config.AfterQueryHooks = []pgmcp.AfterQueryHookEntry{
+		{Name: "should_not_run", Hook: hook},
+	}
+	p, _ := newTestInstance(t, config)
+
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "SELECT pg_sleep(10)"})
+	if output.Error == "" {
+		t.Fatal("expected timeout error")
+	}
+	if !strings.Contains(output.Error, "context deadline exceeded") && !strings.Contains(output.Error, "canceling statement") {
+		t.Fatalf("expected timeout error, got %q", output.Error)
+	}
+	if hook.captured != nil {
+		t.Fatal("AfterQuery hook should NOT have been called when query times out")
+	}
+}
+
+func TestQuery_TimeoutErrorPromptWithAfterHook(t *testing.T) {
+	t.Parallel()
+	// When a query times out, error prompts should be applied AND AfterQuery hooks should not run.
+	hook := &captureAfterHook{}
+	config := defaultConfig()
+	config.Query.DefaultTimeoutSeconds = 1
+	config.DefaultHookTimeoutSeconds = 5
+	config.ErrorPrompts = []pgmcp.ErrorPromptRule{
+		{Pattern: "deadline|canceling", Message: "Query timed out. Please optimize your query."},
+	}
+	config.AfterQueryHooks = []pgmcp.AfterQueryHookEntry{
+		{Name: "should_not_run", Hook: hook},
+	}
+	p, _ := newTestInstance(t, config)
+
+	output := p.Query(context.Background(), pgmcp.QueryInput{SQL: "SELECT pg_sleep(10)"})
+	if output.Error == "" {
+		t.Fatal("expected timeout error")
+	}
+	// Error prompt should be appended
+	if !strings.Contains(output.Error, "Query timed out. Please optimize your query.") {
+		t.Fatalf("expected error prompt appended to timeout error, got %q", output.Error)
+	}
+	// Hook should not have been called
+	if hook.captured != nil {
+		t.Fatal("AfterQuery hook should NOT have been called when query times out")
+	}
+}
+
 // logPassthroughBeforeHook passes queries through unchanged (for logging tests).
 type logPassthroughBeforeHook struct{}
 
