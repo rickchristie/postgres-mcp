@@ -8,7 +8,7 @@ A production-grade **PostgreSQL MCP server** written in Go. Gives AI agents and 
 
 Use it as a **standalone MCP server** or embed it as a **Go library** in your own application. Connect any MCP-compatible AI coding assistant or autonomous agent to your Postgres database with fine-grained SQL protection, query hooks, data masking, and read-only mode.
 
-> **Important:** postgres-mcp is designed for **local or internal network use only**. It has no authentication and no CORS headers by design. Do not expose it to the public internet. Run it on your local machine, behind a VPN, or on an internal server that is not publicly accessible.
+> **Important:** postgres-mcp server mode is designed for **local use only** and binds to `127.0.0.1`. It has no authentication and no CORS headers by design. Do not expose it through a public interface, reverse proxy, tunnel, or port forward.
 
 ## Why postgres-mcp?
 
@@ -182,10 +182,10 @@ This validates your config file (checks JSON, required fields, regex patterns) a
 Example output snippet for Claude Code:
 
 ```
-claude mcp add --transport http postgres http://localhost:8080/mcp
+claude mcp add --transport http postgres http://127.0.0.1:8080/mcp
 ```
 
-Transport: Streamable HTTP (stateless). No SSE, no CORS headers.
+Transport: Streamable HTTP (stateless). No SSE, no CORS headers. Server mode listens on `127.0.0.1` only.
 
 ### Library Mode
 
@@ -480,6 +480,8 @@ Server mode only.
 | `server.port` | int | Yes (> 0) | HTTP server port |
 | `server.health_check_enabled` | bool | No | Enable health check endpoint |
 | `server.health_check_path` | string | If enabled | Health check endpoint path (e.g., `"/health"`) |
+
+Server mode always binds to `127.0.0.1:<server.port>` and does not expose a configuration option for `0.0.0.0`.
 
 The health check endpoint returns `{"status":"ok"}` (HTTP 200). It is a liveness probe only — does not check database connectivity.
 
@@ -969,11 +971,11 @@ Sanitization rules mask field values in query results before they reach the AI a
 
 ### What postgres-mcp does NOT do
 
-- **No authentication or authorization.** The server has no auth mechanism. It is designed to run in trusted environments only (local machine, internal network, behind a reverse proxy with auth).
+- **No authentication or authorization.** The server has no auth mechanism. Server mode binds to `127.0.0.1` and is intended for local clients only.
 - **No CORS headers.** Intentionally omitted — this is not a browser-facing API. Adding CORS would create an attack surface if the server is accidentally exposed.
-- **No network encryption.** Use a reverse proxy (nginx, Caddy) for TLS if needed.
+- **No network encryption.** The built-in server is an unauthenticated loopback HTTP listener.
 
-**Deploy postgres-mcp only in trusted environments.** For multiple databases, run separate instances with different connection strings.
+**Use postgres-mcp server mode only for local clients on the same machine.** For multiple databases, run separate instances with different connection strings.
 
 ## CLI Reference
 

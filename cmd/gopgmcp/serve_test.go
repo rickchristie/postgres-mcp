@@ -95,6 +95,15 @@ func TestLoadConfigFromEnvPath(t *testing.T) {
 	}
 }
 
+func TestServerListenAddrBindsLoopbackOnly(t *testing.T) {
+	t.Parallel()
+
+	addr := serverListenAddr(8080)
+	if addr != "127.0.0.1:8080" {
+		t.Fatalf("expected loopback-only listen address, got %q", addr)
+	}
+}
+
 func TestLoadConfigMissing(t *testing.T) {
 	t.Setenv("GOPGMCP_CONFIG_PATH", "/nonexistent/path/config.json")
 

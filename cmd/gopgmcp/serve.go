@@ -17,6 +17,8 @@ import (
 	"golang.org/x/term"
 )
 
+const loopbackBindHost = "127.0.0.1"
+
 func runServe() error {
 	ctx := context.Background()
 
@@ -79,7 +81,7 @@ func runServe() error {
 	pgmcp.RegisterMCPTools(mcpServer, pgMcp)
 
 	// 6. Start HTTP server with optional health check
-	addr := fmt.Sprintf(":%d", serverConfig.Server.Port)
+	addr := serverListenAddr(serverConfig.Server.Port)
 	mux := http.NewServeMux()
 
 	// Health check endpoint (process liveness only, not DB connectivity)
@@ -109,8 +111,12 @@ func runServe() error {
 	// when a custom *http.Server is provided via WithStreamableHTTPServer.
 	mux.Handle("/mcp", streamableServer)
 
-	logger.Info().Int("port", serverConfig.Server.Port).Msg("starting gopgmcp server")
+	logger.Info().Str("addr", addr).Int("port", serverConfig.Server.Port).Msg("starting gopgmcp server")
 	return streamableServer.Start(addr)
+}
+
+func serverListenAddr(port int) string {
+	return fmt.Sprintf("%s:%d", loopbackBindHost, port)
 }
 
 func loadServerConfig() (*pgmcp.ServerConfig, error) {

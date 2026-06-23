@@ -269,7 +269,7 @@ func TestDoctorPortInSnippets(t *testing.T) {
 	output := buf.String()
 
 	// All agent snippets should use port 9999
-	expectedURL := "http://localhost:9999/mcp"
+	expectedURL := "http://127.0.0.1:9999/mcp"
 	count := strings.Count(output, expectedURL)
 	// 7 occurrences: Claude Code command (1) + Claude Code .mcp.json (1) +
 	// Copilot CLI (1) + Gemini CLI (1) + OpenCode (1) + Cursor (1) + Windsurf (1)

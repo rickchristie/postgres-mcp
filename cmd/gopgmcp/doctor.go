@@ -157,7 +157,7 @@ func printCheck(w io.Writer, useColor bool, pass bool, msg string) {
 // printAgentSnippets prints MCP connection config snippets for various AI agents.
 func printAgentSnippets(w io.Writer, useColor bool, config *pgmcp.ServerConfig) {
 	port := config.Server.Port
-	url := fmt.Sprintf("http://localhost:%d/mcp", port)
+	url := fmt.Sprintf("http://%s:%d/mcp", loopbackBindHost, port)
 
 	heading := func(title string) {
 		if useColor {
